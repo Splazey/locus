@@ -1,0 +1,23 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Generated output
+output/
+
+# Environment files
+.env
+.env.local
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Empty placeholder directories
+graph/

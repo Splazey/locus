@@ -1,0 +1,29 @@
+{
+  "name": "locus-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "electron:start": "set NODE_ENV=development && node node_modules/electron/cli.js electron/main.js",
+    "electron:dev": "concurrently -k \"cross-env NODE_ENV=development vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron electron/main.js\"",
+    "build": "vite build",
+    "electron:preview": "vite build && electron electron/main.js"
+  },
+  "dependencies": {
+    "cytoscape": "^3.30.2",
+    "cytoscape-cose-bilkent": "^4.1.0",
+    "react": "^18.3.1",
+    "react-colorful": "^5.7.0",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.4.11",
+    "vite": "^6.0.7",
+    "wait-on": "^8.0.1"
+  }
+}

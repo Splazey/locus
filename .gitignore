@@ -1,0 +1,13 @@
+notes/
+summary/
+
+output/
+
+.env
+.env.local
+.env.*.local
+
+.claude/settings.local.json
+
+.DS_Store
+Thumbs.db
