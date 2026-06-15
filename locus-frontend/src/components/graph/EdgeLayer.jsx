@@ -57,12 +57,12 @@ function edgeEndpoint(id, toward, positions, sizes, nodeMap) {
   return clipToRect(c, toward, s.w + padding * 2, s.h + padding * 2)
 }
 
-export function EdgeLayer({ edges, positions, sizes, nodeMap, visibleTypes, visibleEdgeTypes, linkedIds, selectedId, zoom = 1, viewMode = 'structural' }) {
+export function EdgeLayer({ edges, positions, sizes, nodeMap, visibleTypes, visibleEdgeTypes, linkedIds, selectedId, zoom = 1, viewMode = 'structural', renderedNodeIds = null, leafEdgesOnly = false }) {
   // Target: edges appear ~1.5 px thick on screen regardless of zoom.
   // SVG strokeWidth = 1.5 / zoom, clamped so it never falls below the default
   // (lines stay 1.5 px minimum at zoom ≥ 1) and never exceeds 8 px SVG at
   // extreme zoom-out levels.
-  const strokeWidth = Math.max(1.5, Math.min(8, 1.5 / zoom))
+  const strokeWidth = Math.max(1.25, Math.min(8, 1.25 / zoom))
   return (
     <g>
       <defs>
@@ -97,6 +97,16 @@ export function EdgeLayer({ edges, positions, sizes, nodeMap, visibleTypes, visi
         if (visibleTypes[sn.type] === false || visibleTypes[tn.type] === false) return null
         if (type === 'calls' && visibleEdgeTypes?.calls === false) return null
         if (type === 'semantic_import' && viewMode !== 'semantic') return null
+
+        // LOD: skip edges whose endpoints are not currently rendered
+        if (renderedNodeIds && (!renderedNodeIds.has(source) || !renderedNodeIds.has(target))) return null
+
+        // Layer split: leaf edges (both endpoints are leaves) vs deep edges (≥1 container endpoint)
+        const srcIsLeaf = LEAF.has(sn.type)
+        const tgtIsLeaf = LEAF.has(tn.type)
+        const isLeafEdge = srcIsLeaf && tgtIsLeaf
+        if (leafEdgesOnly && !isLeafEdge) return null
+        if (!leafEdgesOnly && isLeafEdge) return null
 
         const sc = center(source, positions, sizes)
         const tc = center(target, positions, sizes)

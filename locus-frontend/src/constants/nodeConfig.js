@@ -1,5 +1,6 @@
 /** Shared colour/label config for every node type — used by Cytoscape stylesheet, Sidebar, and minimap. */
 export const NODE_CONFIG = {
+  folder:   { color: '#e3b341', dimColor: '#4a3600', bg: '#15100a', label: 'FOLDER'   },
   file:     { color: '#79c0ff', dimColor: '#1c3461', bg: '#0a1a2e', label: 'FILE'     },
   class:    { color: '#d2a8ff', dimColor: '#3d1f6e', bg: '#160b26', label: 'CLASS'    },
   function: { color: '#56d364', dimColor: '#1a4d22', bg: '#0a1a0d', label: 'FUNC'     },

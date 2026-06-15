@@ -20,6 +20,8 @@
 
 function shortLabel(node) {
   switch (node.type) {
+    case 'folder':
+      return node.name
     case 'file':
       return node.name.split(/[/\\]/).pop() || node.name
     case 'method': {
@@ -108,6 +110,8 @@ export function transformGraphToCytoscape(graphData) {
         endLine:   node.end_line   ?? null,
         docstring: node.docstring  ?? null,
         ...(node.var_type !== undefined ? { varType: node.var_type } : {}),
+        ...(node.file_count !== undefined ? { fileCount: node.file_count } : {}),
+        ...(node.path !== undefined ? { path: node.path } : {}),
       },
     })
   }

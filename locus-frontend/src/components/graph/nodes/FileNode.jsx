@@ -4,6 +4,7 @@ const ICON_PATH =
   ' 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0' +
   ' .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688Z'
 
+import { memo } from 'react'
 import { darkenColor, contrastText } from '../../../utils/colorUtils'
 
 const DEFAULT_COLOR = '#79c0ff'
@@ -13,7 +14,7 @@ const CHAR_W = 7.5
 const ICON_W = 14  // rendered width (14/16 scale of 16px viewBox)
 const GAP    = 6
 
-export function FileNode({ data, position, size, selected, dimmed, onMouseDown, collapsed = false, zoom = 1, color = DEFAULT_COLOR }) {
+export const FileNode = memo(function FileNode({ data, position, size, selected, dimmed, onMouseDown, collapsed = false, zoom = 1, color = DEFAULT_COLOR }) {
   if (!position || !size) return null
   const bg   = darkenColor(color)
   const text = contrastText(bg)
@@ -79,4 +80,4 @@ export function FileNode({ data, position, size, selected, dimmed, onMouseDown, 
       </text>
     </g>
   )
-}
+})

@@ -28,6 +28,12 @@ SKIP_DIRS = {
     "build", "dist", "target", "out", ".idea", ".vscode",
 }
 
+# Extra directories skipped only in --lite mode (tests, fixtures, generated bundles).
+LITE_SKIP_DIRS = {
+    "test", "tests", "__tests__", "spec", "specs", "fixtures",
+    "vendor", "examples", "example", "docs", "doc", "benchmark", "benchmarks",
+}
+
 
 def get_parser(lang):
     """Lazily import and instantiate the parser for *lang*, so grammar
@@ -44,13 +50,19 @@ def get_parser(lang):
     raise ValueError(f"Unsupported language: {lang}")
 
 
-def find_source_files(project_path):
+def find_source_files(project_path, lite=False):
     """Walk *project_path* and return [(filepath, language), ...] for every
-    supported source file, auto-detecting language by extension."""
+    supported source file, auto-detecting language by extension.
+
+    In *lite* mode, additionally skip test/vendor/docs directories and minified
+    bundles to keep large codebases manageable."""
+    skip = SKIP_DIRS | LITE_SKIP_DIRS if lite else SKIP_DIRS
     source_files = []
     for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d.lower() not in skip]
         for file in files:
+            if lite and file.lower().endswith((".min.js", ".bundle.js")):
+                continue
             ext = os.path.splitext(file)[1].lower()
             lang = EXT_TO_LANG.get(ext)
             if lang:
@@ -105,6 +117,12 @@ def main():
         help="Run the semantic clustering pipeline and enrich graph.json with cluster nodes and belongs_to edges.",
     )
     ap.add_argument(
+        "--lite",
+        action="store_true",
+        help="Lite mode for very large codebases: drop variable nodes (~60%% of nodes) "
+             "and skip test/build/vendor directories to keep the graph small.",
+    )
+    ap.add_argument(
         "--no-labels",
         action="store_true",
         help="When --cluster is set, skip Claude API labelling (uses fallback names).",
@@ -127,7 +145,7 @@ def main():
 
     emit_progress(1, "Scanning project files")
     graph = {"nodes": [], "edges": []}
-    source_files = find_source_files(PROJECT_PATH)
+    source_files = find_source_files(PROJECT_PATH, lite=args.lite)
     emit_progress(3, f"Found {len(source_files)} source files")
 
     # Progress budget: parsing fills most of the bar, but leaves room for the
@@ -215,9 +233,10 @@ def main():
             ))
             graph["edges"].append(create_edge(class_id, method_id, "contains"))
 
-        # Deduplicate variables by (parent_class_or_module, name) to avoid repeated self.x
+        # Deduplicate variables by (parent_class_or_module, name) to avoid repeated self.x.
+        # In lite mode, variables are dropped entirely (they are ~60% of nodes).
         seen_vars = set()
-        for var in parsed.get("variables", []):
+        for var in ([] if args.lite else parsed.get("variables", [])):
             parent_class = var.get("parent_class")
             dedup_key = (relative_path, parent_class or "__module__", var["name"])
             if dedup_key in seen_vars:
@@ -443,11 +462,21 @@ def main():
             callee_name = call["callee_name"]
             callee_id = None
 
-            # 1. Same-file function or class match
-            same_file = local_entity.get((relative_path, callee_name))
-            if same_file:
-                callee_id = same_file
-            elif "." in callee_name:
+            # 1a. Same-class method match (handles self.method() after self. is stripped)
+            if call["caller_type"] == "method":
+                caller_name_parts = call["caller_name"].split(".", 1)
+                if len(caller_name_parts) == 2:
+                    same_class_potential = f"method:{relative_path}:{caller_name_parts[0]}.{callee_name}"
+                    if same_class_potential in known_node_ids and same_class_potential != caller_id:
+                        callee_id = same_class_potential
+
+            # 1b. Same-file function or class match
+            if not callee_id:
+                same_file = local_entity.get((relative_path, callee_name))
+                if same_file:
+                    callee_id = same_file
+
+            if not callee_id and "." in callee_name:
                 # Could be ClassName.method_name in the same file
                 cls_part, meth_part = callee_name.split(".", 1)
                 potential = f"method:{relative_path}:{cls_part}.{meth_part}"
@@ -458,7 +487,7 @@ def main():
                     matches = callee_lookup.get(callee_name, [])
                     if len(matches) == 1:
                         callee_id = matches[0]
-            else:
+            elif not callee_id:
                 # Cross-file unique match
                 matches = callee_lookup.get(callee_name, [])
                 if len(matches) == 1 and matches[0] != caller_id:
@@ -475,6 +504,9 @@ def main():
             emitted_calls.add(call_key)
 
             graph["edges"].append(create_edge(caller_id, callee_id, "calls"))
+
+    # --- Folder aggregation: derive directory container nodes from file paths ---
+    _add_folder_aggregation(graph)
 
     # --- Optional semantic clustering pass ---
     if args.cluster:
@@ -497,6 +529,65 @@ def main():
     print()
     print(f"Saved: {OUTPUT_PATH}")
     emit_progress(100, "Analysis complete")
+
+
+def _add_folder_aggregation(graph: dict) -> None:
+    """Derive directory container nodes from file node paths.
+
+    File nodes normally sit at the top level. This builds the directory tree from
+    each file's relative path and appends `folder` nodes plus `contains` edges
+    (folder -> subfolder and folder -> file), so the frontend can present a large
+    codebase as a navigable, collapsible overview. Files at the project root keep
+    no folder parent and stay top-level. Pure post-processing — no parsing.
+
+    Each folder node carries `file_count` (number of descendant files) so the UI
+    can label collapsed folders and size minimap blocks.
+    """
+    file_nodes = [n for n in graph["nodes"] if n["type"] == "file"]
+    if not file_nodes:
+        return
+
+    def folder_id(path):
+        return f"folder:{path}"
+
+    folder_seen = set()          # folder path -> created
+    file_counts = {}             # folder path -> descendant file count
+    new_nodes = []
+    new_edges = []
+
+    for fnode in file_nodes:
+        # File node "name" is the relative path; normalise separators for stable ids.
+        rel = fnode["name"].replace("\\", "/")
+        dirs = rel.split("/")[:-1]   # drop the filename
+        if not dirs:
+            continue                 # root-level file — no folder parent
+
+        parent_path = None
+        cumulative = []
+        for d in dirs:
+            cumulative.append(d)
+            path = "/".join(cumulative)
+            file_counts[path] = file_counts.get(path, 0) + 1
+            if path not in folder_seen:
+                folder_seen.add(path)
+                new_nodes.append({
+                    "id": folder_id(path),
+                    "name": d,          # basename for display
+                    "type": "folder",
+                    "path": path,
+                })
+                if parent_path is not None:
+                    new_edges.append(create_edge(folder_id(parent_path), folder_id(path), "contains"))
+            parent_path = path
+
+        # Link the deepest folder to the file itself.
+        new_edges.append(create_edge(folder_id(parent_path), fnode["id"], "contains"))
+
+    for node in new_nodes:
+        node["file_count"] = file_counts.get(node["path"], 0)
+
+    graph["nodes"].extend(new_nodes)
+    graph["edges"].extend(new_edges)
 
 
 def _enrich_with_clusters(graph: dict, all_parsed: dict, project_path: str, args) -> None:

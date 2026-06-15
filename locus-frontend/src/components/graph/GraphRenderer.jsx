@@ -1,9 +1,11 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from 'react'
 import { useGraphStore } from '../../store/useGraphStore'
 import { NODE_CONFIG } from '../../constants/nodeConfig'
-import { computeLayout, computeSemanticLayout, FILE as FILE_PAD, CLASS as CLASS_PAD } from '../../utils/graphLayout'
+import { computeLayout, computeSemanticLayout, FOLDER as FOLDER_PAD, FILE as FILE_PAD, CLASS as CLASS_PAD } from '../../utils/graphLayout'
 import { EdgeLayer }    from './EdgeLayer'
 import { ClusterLayer } from './ClusterLayer'
+import { Minimap }      from './Minimap'
+import { FolderNode }   from './nodes/FolderNode'
 import { FileNode }     from './nodes/FileNode'
 import { ClassNode }    from './nodes/ClassNode'
 import { FunctionNode } from './nodes/FunctionNode'
@@ -13,9 +15,12 @@ import { ImportModuleNode }   from './nodes/ImportModuleNode'
 import { ImportEntityNode }   from './nodes/ImportEntityNode'
 import { VariableNode } from './nodes/VariableNode'
 
-const MIN_ZOOM       = 0.08
+const MIN_ZOOM       = 0.02   // low enough to frame very large graphs in one view
 const MAX_ZOOM       = 5
 const MOVE_THRESHOLD = 4
+
+// Leaf node types — used to classify edges into leaf vs deep layers.
+const LEAF_TYPES = new Set(['function', 'method', 'import', 'import_module', 'import_entity', 'variable'])
 
 /**
  * LOD_THRESHOLD — apparent on-screen pixel width below which a container node
@@ -183,7 +188,7 @@ function settleAllPeers(positions, sizes, nodeMap, getDesc, pinnedIds, gap) {
 /** Clamp a node's top-left (x, y) so it stays inside its parent's content area. */
 function clampInParent(x, y, sz, parentPos, parentSz, parentType) {
   if (!parentPos || !parentSz) return { x, y }
-  const pad = parentType === 'file' ? FILE_PAD : CLASS_PAD
+  const pad = parentType === 'folder' ? FOLDER_PAD : parentType === 'file' ? FILE_PAD : CLASS_PAD
   return {
     x: Math.max(parentPos.x + pad.padX,
         Math.min(parentPos.x + parentSz.w - pad.padX - sz.w, x)),
@@ -194,7 +199,9 @@ function clampInParent(x, y, sz, parentPos, parentSz, parentType) {
 
 // ── Component ──────────────────────────────────────────────────────────────────
 export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEdgeTypes, onNodeSelect, layoutKey, peerGap = PEER_GAP_DEFAULT, viewMode = 'structural' }) {
-  const storeColors = useGraphStore((s) => s.nodeColors)
+  const storeColors      = useGraphStore((s) => s.nodeColors)
+  const collapsedFolders = useGraphStore((s) => s.collapsedFolders)
+  const toggleFolder     = useGraphStore((s) => s.toggleFolder)
   // Merge store overrides with NODE_CONFIG defaults so every type always has a color
   const nodeColors = useMemo(() => {
     const merged = {}
@@ -215,6 +222,8 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   const [displayPositions, setDisplayPositions] = useState({})
   const [viewport,         setViewport]         = useState({ x: 0, y: 0, zoom: 1 })
   const [selectedId,       setSelectedId]       = useState(null)
+  const [svgSize,          setSvgSize]          = useState({ w: 0, h: 0 })
+  const [searchQuery,      setSearchQuery]      = useState('')
 
   // Refs used inside the rAF loop and stable callbacks (avoid stale closures)
   const posRef              = useRef({})         // mirror of `positions` state
@@ -242,6 +251,21 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     for (const n of nodes) m[n.data.id] = n.data
     return m
   }, [nodes])
+
+  // Partition edges once into "leaf" (both endpoints are leaf nodes, drawn above
+  // containers) and "deep" (≥1 container endpoint, drawn below). Done here so
+  // neither EdgeLayer has to scan the full edge list to classify on every render.
+  const { deepEdges, leafEdges } = useMemo(() => {
+    const deep = [], leaf = []
+    for (const e of edges) {
+      const sn = nodeMap[e.data.source]
+      const tn = nodeMap[e.data.target]
+      if (!sn || !tn) continue
+      if (LEAF_TYPES.has(sn.type) && LEAF_TYPES.has(tn.type)) leaf.push(e)
+      else deep.push(e)
+    }
+    return { deepEdges: deep, leafEdges: leaf }
+  }, [edges, nodeMap])
 
   const childrenOf = useMemo(() => {
     const m = {}
@@ -279,6 +303,16 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     return s
   }, [nodes, sizes, viewport.zoom]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Folder collapse: all descendants of a collapsed folder are hidden ─────
+  // Only applies in structural mode; semantic mode ignores folder structure.
+  const hiddenIds = useMemo(() => {
+    const s = new Set()
+    if (viewMode === 'semantic' || !collapsedFolders || collapsedFolders.size === 0) return s
+    const mark = id => { for (const k of childrenOf[id] ?? []) { s.add(k); mark(k) } }
+    for (const fid of collapsedFolders) mark(fid)
+    return s
+  }, [collapsedFolders, childrenOf, viewMode])
+
   // ── Animation loop — exponential ease-out ─────────────────────────────────────
   // Each frame: display += (target − display) × EASE_FACTOR
   // This is pure exponential decay: no velocity, no overshoot.
@@ -291,13 +325,21 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       const dragging = draggingSubtree.current
       const next     = {}
 
+      // Track whether anything actually changed this frame. When nothing moves
+      // (the common idle case) we skip the setState entirely, so an at-rest
+      // graph triggers zero re-renders no matter how many nodes it has.
+      let moved = false
+
       for (const id of Object.keys(target)) {
         const t = target[id]
         if (!t) continue
 
         if (dragging.has(id)) {
-          // Dragged subtree: snap to exact mouse position, no easing
+          // Dragged subtree: snap to exact mouse position, no easing.
+          // While a drag is in progress we always re-render so the node tracks
+          // the cursor.
           next[id] = { x: t.x, y: t.y }
+          moved = true
           continue
         }
 
@@ -307,14 +349,24 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
 
         // Snap when close enough to avoid endless micro-movement
         if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) {
-          next[id] = { x: t.x, y: t.y }
+          if (dx !== 0 || dy !== 0) {
+            // Just arrived at rest this frame — snap to a fresh object once.
+            moved = true
+            next[id] = { x: t.x, y: t.y }
+          } else {
+            // Already at rest: reuse the SAME object reference so memoized node
+            // components see an unchanged `position`/`cx` prop and skip re-render.
+            next[id] = c
+          }
         } else {
+          moved = true
           next[id] = { x: c.x + dx * EASE_FACTOR, y: c.y + dy * EASE_FACTOR }
         }
       }
 
       displayPosRef.current = next
-      setDisplayPositions({ ...next })
+      // Idle frames mutate the ref but skip React: no commit, no reconciliation.
+      if (moved) setDisplayPositions(next)
       rafId = requestAnimationFrame(step)
     }
     rafId = requestAnimationFrame(step)
@@ -353,10 +405,18 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   // precedence over the computed layout — except on an explicit re-layout
   // (layoutKey bump), which discards them for this mode.
   const prevLayoutKeyRef = useRef(layoutKey)
+  const prevCollapseRef  = useRef(collapsedFolders)
   useEffect(() => {
+    // A collapse/expand toggle re-runs layout but should NOT refit the viewport
+    // or clear the selection — only a graph/mode/relayout change does that.
+    const collapseOnly =
+      prevCollapseRef.current !== collapsedFolders &&
+      layoutKey === prevLayoutKeyRef.current
+    prevCollapseRef.current = collapsedFolders
+
     const { positions: lp, sizes: s } = viewMode === 'semantic'
       ? computeSemanticLayout(elements)
-      : computeLayout(elements)
+      : computeLayout(elements, collapsedFolders)
 
     let p = lp
     const store = useGraphStore.getState()
@@ -385,10 +445,11 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     repulsionTimersRef.current = {}
     draggingSubtree.current    = new Set()
     setDisplayPositions({ ...p })
+    if (collapseOnly) return        // keep viewport + selection on collapse/expand
     setSelectedId(null)
     const t = setTimeout(() => fitToContent(p, s), 50)
     return () => clearTimeout(t)
-  }, [elements, layoutKey, viewMode, fitToContent])
+  }, [elements, layoutKey, viewMode, collapsedFolders, fitToContent])
 
   // Re-settle all nodes when the peerGap changes (slider released).
   // Skipped on first mount (restPosRef is empty until a graph loads).
@@ -429,6 +490,22 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     }
     svg.addEventListener('wheel', onWheel, { passive: false })
     return () => svg.removeEventListener('wheel', onWheel)
+  }, [])
+
+  // Track the SVG's on-screen size so viewport culling knows the visible area.
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const apply = () => {
+      const r = svg.getBoundingClientRect()
+      setSvgSize(prev =>
+        (prev.w === r.width && prev.h === r.height) ? prev : { w: r.width, h: r.height }
+      )
+    }
+    apply()
+    const ro = new ResizeObserver(apply)
+    ro.observe(svg)
+    return () => ro.disconnect()
   }, [])
 
   // ── Helpers used by drag handlers ──────────────────────────────────────────────
@@ -562,6 +639,19 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       startPositions,
     }
   }, [getDescendants, nodeMap, childrenOf])
+
+  // Per-id handler cache: `onNodeDown(id)` builds a fresh closure each call, which
+  // would defeat React.memo on the node components (onMouseDown prop would change
+  // every render). Cache one stable handler per id, invalidated only when
+  // onNodeDown itself changes (i.e. on graph/layout change, not on animation).
+  const nodeDownFor = useMemo(() => {
+    const cache = new Map()
+    return (id) => {
+      let h = cache.get(id)
+      if (!h) { h = onNodeDown(id); cache.set(id, h) }
+      return h
+    }
+  }, [onNodeDown])
 
   const onMouseMove = useCallback(e => {
     const rect = svgRef.current?.getBoundingClientRect()
@@ -785,7 +875,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   }, [])
 
   // ── Zoom helpers ──────────────────────────────────────────────────────────────
-  const zoomBy = factor => {
+  const zoomBy = useCallback(factor => {
     const svg  = svgRef.current
     const rect = svg?.getBoundingClientRect()
     if (!rect) return
@@ -795,7 +885,133 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       const ratio = zoom / vp.zoom
       return { zoom, x: mx - (mx - vp.x) * ratio, y: my - (my - vp.y) * ratio }
     })
-  }
+  }, [])
+
+  // Fit the whole graph using the latest rendered geometry (read from refs so
+  // keyboard / button handlers never close over stale positions).
+  const fitView = useCallback(() => {
+    fitToContent(displayPosRef.current, sizesRef.current)
+  }, [fitToContent])
+
+  // Reset to 100% zoom, centred on the current viewport centre.
+  const resetZoom = useCallback(() => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const mx = rect.width / 2, my = rect.height / 2
+    setViewport(vp => {
+      const ratio = 1 / vp.zoom
+      return { zoom: 1, x: mx - (mx - vp.x) * ratio, y: my - (my - vp.y) * ratio }
+    })
+  }, [])
+
+  // Keyboard navigation: +/= zoom in, -/_ zoom out, 0 fit, 1 reset to 100%.
+  // Ignored while typing in an input/textarea (e.g. the search box).
+  // Placed after zoomBy/fitView/resetZoom are declared to avoid temporal dead zone.
+  useEffect(() => {
+    const onKey = e => {
+      const tag = e.target?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(1.25) }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(0.8) }
+      else if (e.key === '0') { e.preventDefault(); fitView() }
+      else if (e.key === '1') { e.preventDefault(); resetZoom() }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomBy, fitView, resetZoom])
+
+  // Center the viewport on a node at a comfortable zoom (reads latest geometry).
+  const centerOnNode = useCallback((id) => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const pos = posRef.current[id]
+    const sz  = sizesRef.current[id]
+    if (!pos || !sz) return
+    const cx = pos.x + sz.w / 2
+    const cy = pos.y + sz.h / 2
+    const target = Math.max(0.4, Math.min(1.6,
+      (Math.min(rect.width, rect.height) * 0.4) / Math.max(sz.w, sz.h)))
+    setViewport({ zoom: target, x: rect.width / 2 - cx * target, y: rect.height / 2 - cy * target })
+  }, [])
+
+  // Select + center on a node by id, expanding any collapsed folder ancestors so
+  // the target is actually visible (search-to-focus).
+  const focusNode = useCallback((id) => {
+    const data = nodeMap[id]
+    if (!data) return
+    const store = useGraphStore.getState()
+    const collapsed = store.collapsedFolders
+    const toExpand = []
+    let cur = data.parent
+    while (cur) { if (collapsed.has(cur)) toExpand.push(cur); cur = nodeMap[cur]?.parent }
+
+    setSelectedId(id)
+    onNodeSelect?.({ id, type: data.type, data: { ...data } })
+
+    if (toExpand.length) {
+      // Expand ancestors, then center once the re-layout has produced positions.
+      store.revealFolders(toExpand)
+      setTimeout(() => centerOnNode(id), 90)
+    } else {
+      centerOnNode(id)
+    }
+  }, [nodeMap, onNodeSelect, centerOnNode])
+
+  // ── Search results (by label / full path) ─────────────────────────────────
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    if (!q) return []
+    const out = []
+    for (const n of nodes) {
+      const d = n.data
+      const label = (d.label ?? '').toLowerCase()
+      const full  = (d.fullLabel ?? '').toLowerCase()
+      if (label.includes(q) || full.includes(q)) {
+        out.push({ id: d.id, label: d.label, type: d.type, full: d.fullLabel, starts: label.startsWith(q) ? 1 : 0 })
+        if (out.length > 250) break
+      }
+    }
+    out.sort((a, b) => (b.starts - a.starts) || ((a.label?.length ?? 0) - (b.label?.length ?? 0)))
+    return out.slice(0, 25)
+  }, [searchQuery, nodes])
+
+  // ── Minimap data: top-level container boxes + overall bounds ───────────────
+  const minimapData = useMemo(() => {
+    const semantic = viewMode === 'semantic'
+    const items = []
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const n of nodes) {
+      const d = n.data
+      if (d.parent) continue                                   // top-level only
+      if (semantic && (d.type === 'file' || d.type === 'folder')) continue
+      if (!semantic && hiddenIds.has(d.id)) continue
+      if (visibleTypes[d.type] === false) continue
+      const p = positions[d.id], s = sizes[d.id]
+      if (!p || !s) continue
+      items.push({ id: d.id, x: p.x, y: p.y, w: s.w, h: s.h, color: nodeColors[d.type] })
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+      maxX = Math.max(maxX, p.x + s.w); maxY = Math.max(maxY, p.y + s.h)
+    }
+    if (!items.length) return null
+    return { items, bounds: { minX, minY, maxX, maxY } }
+  }, [nodes, positions, sizes, hiddenIds, viewMode, visibleTypes, nodeColors])
+
+  // Currently-visible world rectangle (no cull margin) — drawn on the minimap.
+  const viewportRect = useMemo(() => {
+    if (!svgSize.w) return null
+    const z = viewport.zoom || 1
+    return {
+      minX: (0 - viewport.x) / z, maxX: (svgSize.w - viewport.x) / z,
+      minY: (0 - viewport.y) / z, maxY: (svgSize.h - viewport.y) / z,
+    }
+  }, [viewport, svgSize])
+
+  const recenterOn = useCallback((wx, wy) => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setViewport(vp => ({ ...vp, x: rect.width / 2 - wx * vp.zoom, y: rect.height / 2 - wy * vp.zoom }))
+  }, [])
 
   // ── Semantic mode: nodeMap with file parentage stripped ───────────────────
   //
@@ -843,6 +1059,35 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
 
   const isSemantic = viewMode === 'semantic'
 
+  // ── Viewport culling ──────────────────────────────────────────────────────────
+  // Only nodes whose box intersects the visible world-rect (inflated by a full
+  // screen of margin so panning doesn't pop nodes in at the edges) are rendered.
+  // Combined with LOD this caps the rendered node count to a few hundred no
+  // matter how large the graph is. Disabled until we know the SVG size.
+  const cullRect = useMemo(() => {
+    if (!svgSize.w || !svgSize.h) return null
+    const z = viewport.zoom || 1
+    const minX = (0          - viewport.x) / z
+    const maxX = (svgSize.w  - viewport.x) / z
+    const minY = (0          - viewport.y) / z
+    const maxY = (svgSize.h  - viewport.y) / z
+    const marginX = svgSize.w / z
+    const marginY = svgSize.h / z
+    return {
+      minX: minX - marginX, maxX: maxX + marginX,
+      minY: minY - marginY, maxY: maxY + marginY,
+    }
+  }, [viewport, svgSize])
+
+  const inView = useCallback((id) => {
+    if (!cullRect) return true
+    const p = dp[id] ?? positions[id]
+    const s = sizes[id]
+    if (!p || !s) return true   // unknown geometry — don't hide
+    return p.x <= cullRect.maxX && p.x + s.w >= cullRect.minX &&
+           p.y <= cullRect.maxY && p.y + s.h >= cullRect.minY
+  }, [cullRect, dp, positions, sizes])
+
   // ── Visible node sets, filtered by type visibility + LOD collapse ─────────
   //
   // In semantic mode, file nodes are excluded entirely.
@@ -851,30 +1096,48 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   // just aren't rendered.  The container itself still renders with collapsed=true
   // so the cross-fade to centred-label happens on the node itself.
 
-  // File nodes (structural mode only)
-  const fileNodes = isSemantic ? [] : nodes.filter(n =>
-    n.data.type === 'file' && visibleIds.has(n.data.id)
+  // Folder nodes (structural mode only). A folder is shown unless it's itself
+  // inside a collapsed ancestor folder.
+  const folderNodes = isSemantic ? [] : nodes.filter(n =>
+    n.data.type === 'folder' && visibleIds.has(n.data.id) &&
+    !hiddenIds.has(n.data.id) && inView(n.data.id)
   )
 
-  // Class nodes: skip if the parent file is LOD-collapsed
+  // File nodes (structural mode only)
+  const fileNodes = isSemantic ? [] : nodes.filter(n =>
+    n.data.type === 'file' && visibleIds.has(n.data.id) &&
+    !hiddenIds.has(n.data.id) && inView(n.data.id)
+  )
+
+  // Class nodes: skip if hidden by a collapsed folder or LOD-collapsed parent file
   const classNodes = nodes.filter(n => {
     if (n.data.type !== 'class' || !visibleIds.has(n.data.id)) return false
+    if (hiddenIds.has(n.data.id)) return false
     const pid = n.data.parent
     // If the parent file is collapsed the class is unloaded
-    return !pid || !collapsedIds.has(pid)
+    if (pid && collapsedIds.has(pid)) return false
+    return inView(n.data.id)
   })
 
-  // Leaf nodes: skip if direct parent or grandparent container is LOD-collapsed
+  // Leaf nodes: skip if hidden by a collapsed folder, or direct/grandparent LOD-collapsed
   const leafNodes = nodes.filter(n => {
     const t = n.data.type
     if (t !== 'function' && t !== 'method' && t !== 'import' && t !== 'import_module' && t !== 'import_entity' && t !== 'variable') return false
-    if (!visibleIds.has(n.data.id)) return false
+    if (!visibleIds.has(n.data.id) || hiddenIds.has(n.data.id)) return false
     const pid = n.data.parent
-    if (!pid) return true            // top-level import — always render
-    if (collapsedIds.has(pid)) return false          // direct parent collapsed
-    const gid = nodeMap[pid]?.parent
-    return !gid || !collapsedIds.has(gid)            // grandparent collapsed
+    if (pid && collapsedIds.has(pid)) return false   // direct parent collapsed
+    const gid = pid ? nodeMap[pid]?.parent : null
+    if (gid && collapsedIds.has(gid)) return false   // grandparent collapsed
+    return inView(n.data.id)                          // top-level imports also culled
   })
+
+  // Set of node IDs that are actually rendered right now (respects type visibility + LOD).
+  // Passed to EdgeLayer so edges whose endpoints aren't visible get suppressed.
+  const renderedNodeIds = new Set()
+  for (const n of folderNodes) renderedNodeIds.add(n.data.id)
+  for (const n of fileNodes)  renderedNodeIds.add(n.data.id)
+  for (const n of classNodes) renderedNodeIds.add(n.data.id)
+  for (const n of leafNodes)  renderedNodeIds.add(n.data.id)
 
   const renderLeaf = n => {
     const id  = n.data.id
@@ -888,7 +1151,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       key: id, data: n.data, cx, cy, r,
       selected:    selectedId === id,
       dimmed:      linkedIds !== null && !linkedIds.has(id),
-      onMouseDown: onNodeDown(id),
+      onMouseDown: nodeDownFor(id),
       color:       nodeColors[n.data.type],
     }
     if (n.data.type === 'function')       return <FunctionNode     {...common} />
@@ -923,8 +1186,26 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
             />
           )}
 
+          {/* Folder containers — outermost boxes, drawn at the back */}
+          {folderNodes.map(n => (
+            <FolderNode
+              key={n.data.id}
+              data={n.data}
+              position={dp[n.data.id]}
+              size={sizes[n.data.id]}
+              selected={selectedId === n.data.id}
+              dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
+              onMouseDown={nodeDownFor(n.data.id)}
+              collapsed={collapsedFolders.has(n.data.id)}
+              zoom={viewport.zoom}
+              color={nodeColors.folder}
+              onToggle={toggleFolder}
+            />
+          ))}
+
+          {/* Deep edges: ≥1 container endpoint — render below file/class nodes */}
           <EdgeLayer
-            edges={edges}
+            edges={deepEdges}
             positions={dp}
             sizes={sizes}
             nodeMap={nodeMap}
@@ -934,6 +1215,8 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
             selectedId={selectedId}
             zoom={viewport.zoom}
             viewMode={viewMode}
+            renderedNodeIds={renderedNodeIds}
+            leafEdgesOnly={false}
           />
 
           {fileNodes.map(n => (
@@ -944,7 +1227,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
               size={sizes[n.data.id]}
               selected={selectedId === n.data.id}
               dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
-              onMouseDown={onNodeDown(n.data.id)}
+              onMouseDown={nodeDownFor(n.data.id)}
               collapsed={collapsedIds.has(n.data.id)}
               zoom={viewport.zoom}
               color={nodeColors.file}
@@ -959,21 +1242,94 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
               size={sizes[n.data.id]}
               selected={selectedId === n.data.id}
               dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
-              onMouseDown={onNodeDown(n.data.id)}
+              onMouseDown={nodeDownFor(n.data.id)}
               collapsed={collapsedIds.has(n.data.id)}
               zoom={viewport.zoom}
               color={nodeColors.class}
             />
           ))}
 
+          {/* Leaf edges: both endpoints are leaf nodes — render above containers, below leaf nodes */}
+          <EdgeLayer
+            edges={leafEdges}
+            positions={dp}
+            sizes={sizes}
+            nodeMap={nodeMap}
+            visibleTypes={visibleTypes}
+            visibleEdgeTypes={visibleEdgeTypes}
+            linkedIds={linkedIds}
+            selectedId={selectedId}
+            zoom={viewport.zoom}
+            viewMode={viewMode}
+            renderedNodeIds={renderedNodeIds}
+            leafEdgesOnly={true}
+          />
+
           {leafNodes.map(renderLeaf)}
         </g>
       </svg>
 
+      {/* ── Search-to-focus ─────────────────────────────────────────────── */}
+      <div style={{ position: 'absolute', top: 14, left: 14, width: 260, zIndex: 5 }}>
+        <input
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && searchResults[0]) { focusNode(searchResults[0].id); e.preventDefault() }
+            else if (e.key === 'Escape') setSearchQuery('')
+          }}
+          placeholder="Search nodes…"
+          spellCheck={false}
+          style={{
+            width: '100%', boxSizing: 'border-box', padding: '7px 10px',
+            background: '#0d1117', border: '1px solid #30363d', borderRadius: 6,
+            color: '#e6edf3', fontSize: 13, fontFamily: 'inherit', outline: 'none',
+          }}
+        />
+        {searchResults.length > 0 && (
+          <ul style={{
+            listStyle: 'none', margin: '4px 0 0', padding: 4, maxHeight: 320, overflowY: 'auto',
+            background: '#161b22', border: '1px solid #30363d', borderRadius: 6,
+          }}>
+            {searchResults.map(r => (
+              <li
+                key={r.id}
+                onClick={() => focusNode(r.id)}
+                title={r.full || r.label}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px',
+                  borderRadius: 4, cursor: 'pointer', fontSize: 12.5,
+                  background: selectedId === r.id ? '#1f2630' : 'transparent',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#1f2630' }}
+                onMouseLeave={e => { e.currentTarget.style.background = selectedId === r.id ? '#1f2630' : 'transparent' }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: nodeColors[r.type] ?? '#8b949e' }} />
+                <span style={{ color: '#e6edf3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.label}</span>
+                <span style={{ color: '#6e7681', marginLeft: 'auto', flexShrink: 0, textTransform: 'uppercase', fontSize: 10 }}>{r.type}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* ── Minimap ─────────────────────────────────────────────────────── */}
+      {minimapData && (
+        <div style={{ position: 'absolute', bottom: 16, left: 14, zIndex: 5 }}>
+          <Minimap
+            items={minimapData.items}
+            bounds={minimapData.bounds}
+            viewportRect={viewportRect}
+            onRecenter={recenterOn}
+          />
+        </div>
+      )}
+
       <div style={{ position: 'absolute', bottom: 16, right: 16, display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <button style={BTN} onClick={() => zoomBy(1.25)} title="Zoom in">+</button>
-        <button style={BTN} onClick={() => zoomBy(0.8)}  title="Zoom out">−</button>
-        <button style={BTN} onClick={() => fitToContent(dp, sizes)} title="Fit to content">
+        <button style={BTN} onClick={() => zoomBy(1.25)} title="Zoom in (+)">+</button>
+        <button style={BTN} onClick={() => zoomBy(0.8)}  title="Zoom out (−)">−</button>
+        <button style={{ ...BTN, fontSize: 10, fontWeight: 700 }} onClick={resetZoom} title="Reset zoom to 100% (1)">1:1</button>
+        <button style={BTN} onClick={fitView} title="Fit to content (0)">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
             <path d="M1.5 1h4a.5.5 0 0 1 0 1H2v3.5a.5.5 0 0 1-1 0V1.5A.5.5 0 0 1 1.5 1zm9 0a.5.5 0 0 1 .5.5V5a.5.5 0 0 1-1 0V2h-3.5a.5.5 0 0 1 0-1H10.5zM1 10.5a.5.5 0 0 1 .5-.5H5a.5.5 0 0 1 0 1H2v3a.5.5 0 0 1-1 0v-3.5zm14 0v3.5a.5.5 0 0 1-1 0V11h-3a.5.5 0 0 1 0-1h3.5a.5.5 0 0 1 .5.5z"/>
           </svg>

@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { darkenColor, contrastText } from '../../../utils/colorUtils'
 
 const DEFAULT_COLOR = '#39d5c4'
@@ -7,7 +8,7 @@ function clip(s, max) {
   return s.length > max ? s.slice(0, max - 1) + '…' : s
 }
 
-export function VariableNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
+export const VariableNode = memo(function VariableNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
   const bg      = darkenColor(color)
   const text    = contrastText(bg)
   const varType = clip(data.varType || 'var', 10)
@@ -24,4 +25,4 @@ export function VariableNode({ data, cx, cy, r, selected, dimmed, onMouseDown, c
       </text>
     </g>
   )
-}
+})

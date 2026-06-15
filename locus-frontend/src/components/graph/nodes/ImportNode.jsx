@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { darkenColor, contrastText } from '../../../utils/colorUtils'
 
 const DEFAULT_COLOR = '#ffa657'
@@ -25,7 +26,7 @@ function wrapLabel(label) {
   return [first, second.length > 13 ? second.slice(0, 12) + '…' : second]
 }
 
-export function ImportNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
+export const ImportNode = memo(function ImportNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
   const bg      = darkenColor(color)
   const text    = contrastText(bg)
   const lines   = wrapLabel(data.label)
@@ -48,4 +49,4 @@ export function ImportNode({ data, cx, cy, r, selected, dimmed, onMouseDown, col
       </text>
     </g>
   )
-}
+})

@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { darkenColor, contrastText } from '../../../utils/colorUtils'
 
 const DEFAULT_COLOR = '#d2a8ff'
@@ -7,7 +8,7 @@ const CHAR_W = 6.5
 const ICON_W = 16  // diameter of the C circle
 const GAP    = 6
 
-export function ClassNode({ data, position, size, selected, dimmed, onMouseDown, collapsed = false, zoom = 1, color = DEFAULT_COLOR }) {
+export const ClassNode = memo(function ClassNode({ data, position, size, selected, dimmed, onMouseDown, collapsed = false, zoom = 1, color = DEFAULT_COLOR }) {
   if (!position || !size) return null
   const bg   = darkenColor(color)
   const text = contrastText(bg)
@@ -78,4 +79,4 @@ export function ClassNode({ data, position, size, selected, dimmed, onMouseDown,
       </text>
     </g>
   )
-}
+})

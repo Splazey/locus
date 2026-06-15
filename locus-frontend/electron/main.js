@@ -159,6 +159,7 @@ ipcMain.handle('analyze-project', async (event, projectPath, options = {}) => {
     const outputPath = path.join(BACKEND_DIR, 'output', 'graph.json')
     const args = ['analyze.py', projectPath]
     if (options.cluster)   args.push('--cluster')
+    if (options.lite)      args.push('--lite')
     if (options.noLabels)  args.push('--no-labels')
     if (options.apiKey)    args.push('--api-key', options.apiKey)
 

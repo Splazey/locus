@@ -7,6 +7,7 @@ const PEER_GAP_MIN = 10
 const PEER_GAP_MAX = 300
 
 const TYPE_LABELS = {
+  folder:        'Folders',
   file:          'Files',
   class:         'Classes',
   function:      'Functions',
@@ -161,9 +162,12 @@ export function Sidebar() {
     isLoading, error, clusters,
     nodeColors, setNodeColor,
     toggleNodeType, toggleEdgeType, triggerRelayout, setPeerGap,
-    projectPath, currentSave, dirty,
+    projectPath, currentSave, dirty, viewMode,
+    collapseAllFolders, expandAllFolders,
     requestGoHome, buildSavePayload, setCurrentSave, clearDirty, setError,
   } = useGraphStore()
+
+  const hasFolders = (stats?.byType?.folder ?? 0) > 0
 
   const [colorPickerOpen, setColorPickerOpen] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -414,6 +418,29 @@ export function Sidebar() {
             </svg>
             Re-layout graph
           </button>
+
+          {hasFolders && viewMode === 'structural' && (
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <button
+                className="sidebar__btn"
+                style={{ flex: 1 }}
+                onClick={collapseAllFolders}
+                disabled={isLoading}
+                title="Collapse every top-level folder to an overview"
+              >
+                Collapse folders
+              </button>
+              <button
+                className="sidebar__btn"
+                style={{ flex: 1 }}
+                onClick={expandAllFolders}
+                disabled={isLoading}
+                title="Expand all folders"
+              >
+                Expand folders
+              </button>
+            </div>
+          )}
         </section>
 
       </div>

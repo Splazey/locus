@@ -42,6 +42,8 @@ export function HomeScreen() {
   const error           = useGraphStore((s) => s.error)
   const clusterEnabled  = useGraphStore((s) => s.clusterEnabled)
   const setClusterEnabled = useGraphStore((s) => s.setClusterEnabled)
+  const liteEnabled     = useGraphStore((s) => s.liteEnabled)
+  const setLiteEnabled  = useGraphStore((s) => s.setLiteEnabled)
 
   const refreshRecents = useCallback(async () => {
     if (!isElectron) return
@@ -69,7 +71,7 @@ export function HomeScreen() {
     store.setViewMode('structural')
     store.setScreen('loading')
     try {
-      const graph = await window.electronAPI.analyzeProject(trimmed, { cluster: clusterEnabled })
+      const graph = await window.electronAPI.analyzeProject(trimmed, { cluster: clusterEnabled, lite: liteEnabled })
       store.setGraph(graph)
       store.setProjectPath(trimmed)
       // Persist immediately so the codebase shows up in recents without re-processing
@@ -193,6 +195,23 @@ export function HomeScreen() {
               CodeBERT embeddings, HDBSCAN clustering, and Claude-generated
               names. Enables the Semantic view, but makes analysis noticeably
               slower.
+            </span>
+          </button>
+
+          <button
+            className={`cluster-pill${liteEnabled ? ' cluster-pill--on' : ''}`}
+            onClick={() => setLiteEnabled(!liteEnabled)}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none"
+              stroke="currentColor" strokeWidth="1.5">
+              <path d="M9 1L2 9h5l-1 6 7-8H8l1-6z" fill="currentColor" stroke="none" />
+            </svg>
+            Lite Mode
+            <span className="cluster-pill__knob" />
+            <span className="cluster-pill__popup">
+              For very large codebases: drops variable nodes (~60% of the graph)
+              and skips test, build, vendor and docs directories. Produces a far
+              smaller, faster graph focused on files, classes and functions.
             </span>
           </button>
         </div>

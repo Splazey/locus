@@ -5,7 +5,7 @@ import { NODE_CONFIG } from '../constants/nodeConfig'
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 
 const TYPE_LABEL = {
-  file: 'File', class: 'Class', function: 'Function',
+  folder: 'Folder', file: 'File', class: 'Class', function: 'Function',
   method: 'Method', import: 'Import', import_module: 'Source Module', import_entity: 'Import Entity',
   variable: 'Variable', cluster: 'Cluster',
 }
@@ -297,6 +297,22 @@ export function RightSidebar() {
                 </>
               )
             })()}
+
+            {/* ── Folder contents (files + subfolders) ──────────────────────── */}
+            {node?.type === 'folder' && children.length > 0 && (
+              <section className="rsb-section">
+                <h4 className="rsb-section-title">Contents{node.fileCount != null ? ` · ${node.fileCount} files` : ''}</h4>
+                <ul className="rsb-list">
+                  {children.map((c) => (
+                    <li key={c.id} className="rsb-list__item">
+                      <span className="rsb-list__dot" style={{ background: NODE_CONFIG[c.type]?.color }} />
+                      <span className="rsb-list__type">{TYPE_LABEL[c.type] ?? c.type}</span>
+                      <span className="rsb-list__name rsb-mono">{c.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
 
             {/* ── File contents ─────────────────────────────────────────────── */}
             {node?.type === 'file' && children.length > 0 && (

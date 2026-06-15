@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { darkenColor, contrastText } from '../../../utils/colorUtils'
 
 const DEFAULT_COLOR = '#56d364'
@@ -7,7 +8,7 @@ function clip(label) {
   return label.length > 14 ? label.slice(0, 13) + '…' : label
 }
 
-export function FunctionNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
+export const FunctionNode = memo(function FunctionNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
   const bg   = darkenColor(color)
   const text = contrastText(bg)
   return (
@@ -22,4 +23,4 @@ export function FunctionNode({ data, cx, cy, r, selected, dimmed, onMouseDown, c
       </text>
     </g>
   )
-}
+})

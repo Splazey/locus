@@ -1,8 +1,9 @@
+import { memo } from 'react'
 import { darkenColor, contrastText } from '../../../utils/colorUtils'
 
 const DEFAULT_COLOR = '#e3b341'
 
-export function ImportEntityNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
+export const ImportEntityNode = memo(function ImportEntityNode({ data, cx, cy, r, selected, dimmed, onMouseDown, color = DEFAULT_COLOR }) {
   const bg   = darkenColor(color)
   const text = contrastText(bg)
   return (
@@ -17,4 +18,4 @@ export function ImportEntityNode({ data, cx, cy, r, selected, dimmed, onMouseDow
       </text>
     </g>
   )
-}
+})
