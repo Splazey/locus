@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useGraphStore } from '../store/useGraphStore'
 import { SettingsModal } from './SettingsModal'
+import logo from '../assets/logo.png'
 
 const isElectron = typeof window !== 'undefined' && !!window.electronAPI
 
@@ -17,20 +18,8 @@ function timeAgo(ts) {
   return new Date(ts).toLocaleDateString()
 }
 
-function LocusMark({ size = 56 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <circle cx="12" cy="12" r="3.5" fill="#388bfd" />
-      <circle cx="4"  cy="6"  r="2" fill="#388bfd" opacity=".6" />
-      <circle cx="20" cy="6"  r="2" fill="#388bfd" opacity=".6" />
-      <circle cx="4"  cy="18" r="2" fill="#388bfd" opacity=".6" />
-      <circle cx="20" cy="18" r="2" fill="#388bfd" opacity=".6" />
-      <line x1="6"  y1="6.5"  x2="10.2" y2="10.8" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-      <line x1="18" y1="6.5"  x2="13.8" y2="10.8" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-      <line x1="6"  y1="17.5" x2="10.2" y2="13.2" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-      <line x1="18" y1="17.5" x2="13.8" y2="13.2" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-    </svg>
-  )
+function LocusMark({ width = 260 }) {
+  return <img src={logo} alt="Locus" width={width} style={{ height: 'auto' }} />
 }
 
 export function HomeScreen() {
@@ -140,7 +129,6 @@ export function HomeScreen() {
       <div className="home__center">
         <div className="home__brand">
           <LocusMark />
-          <h1 className="home__title">Locus</h1>
           <p className="home__subtitle">Visualize the structure of any codebase</p>
         </div>
 

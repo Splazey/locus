@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { HexColorPicker } from 'react-colorful'
 import { useGraphStore } from '../store/useGraphStore'
 import { NODE_CONFIG } from '../constants/nodeConfig'
+import logo from '../assets/logo.png'
 
 const PEER_GAP_MIN = 10
 const PEER_GAP_MAX = 300
@@ -201,18 +202,7 @@ export function Sidebar() {
     <aside className="sidebar">
       {/* ── Logo + Home button ───────────────────────────────────────────── */}
       <div className="sidebar__logo">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-          <circle cx="12" cy="12" r="3.5" fill="#388bfd" />
-          <circle cx="4"  cy="6"  r="2" fill="#388bfd" opacity=".6" />
-          <circle cx="20" cy="6"  r="2" fill="#388bfd" opacity=".6" />
-          <circle cx="4"  cy="18" r="2" fill="#388bfd" opacity=".6" />
-          <circle cx="20" cy="18" r="2" fill="#388bfd" opacity=".6" />
-          <line x1="6"  y1="6.5" x2="10.2" y2="10.8" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-          <line x1="18" y1="6.5" x2="13.8" y2="10.8" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-          <line x1="6"  y1="17.5" x2="10.2" y2="13.2" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-          <line x1="18" y1="17.5" x2="13.8" y2="13.2" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-        </svg>
-        <span className="sidebar__logo-text">Locus</span>
+        <img src={logo} alt="Locus" height="28" style={{ width: 'auto' }} />
         <button
           className="sidebar__home-btn"
           onClick={requestGoHome}

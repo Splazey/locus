@@ -1,4 +1,5 @@
 import { useGraphStore } from '../store/useGraphStore'
+import logo from '../assets/logo.png'
 
 /**
  * Full-screen loading view shown while the backend processes a codebase.
@@ -12,17 +13,7 @@ export function LoadingScreen() {
   return (
     <div className="loading-screen">
       <div className="loading-screen__inner">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" className="loading-screen__mark">
-          <circle cx="12" cy="12" r="3.5" fill="#388bfd" />
-          <circle cx="4"  cy="6"  r="2" fill="#388bfd" opacity=".6" />
-          <circle cx="20" cy="6"  r="2" fill="#388bfd" opacity=".6" />
-          <circle cx="4"  cy="18" r="2" fill="#388bfd" opacity=".6" />
-          <circle cx="20" cy="18" r="2" fill="#388bfd" opacity=".6" />
-          <line x1="6"  y1="6.5"  x2="10.2" y2="10.8" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-          <line x1="18" y1="6.5"  x2="13.8" y2="10.8" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-          <line x1="6"  y1="17.5" x2="10.2" y2="13.2" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-          <line x1="18" y1="17.5" x2="13.8" y2="13.2" stroke="#388bfd" strokeWidth="1.4" opacity=".5" />
-        </svg>
+        <img src={logo} alt="Locus" width="160" className="loading-screen__mark" style={{ height: 'auto' }} />
 
         <h2 className="loading-screen__title">Processing codebase</h2>
 
