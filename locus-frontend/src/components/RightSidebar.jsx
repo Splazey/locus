@@ -38,6 +38,24 @@ function edgeHeading(type, dir) {
   return `${dir === 'out' ? '↗ ' : '↙ '}${EDGE_LABEL[type] ?? type}${dir === 'in' ? ' (incoming)' : ''}`
 }
 
+/**
+ * A clickable node row. Clicking asks the canvas to deselect the current
+ * node, select this one, and glide the camera onto it (via requestFocusNode).
+ */
+function NodeRow({ id, onFocus, className = 'rsb-list__item', children }) {
+  return (
+    <li>
+      <button
+        type="button"
+        className={`${className} rsb-list__item--btn`}
+        onClick={() => onFocus(id)}
+      >
+        {children}
+      </button>
+    </li>
+  )
+}
+
 function fileFromId(nodeId) {
   if (!nodeId || nodeId.startsWith('imp:')) return null
   if (nodeId.startsWith('import_module:') || nodeId.startsWith('import_entity:')) return null
@@ -46,10 +64,11 @@ function fileFromId(nodeId) {
 }
 
 export function RightSidebar() {
-  const selectedNode    = useGraphStore((s) => s.selectedNode)
-  const elements        = useGraphStore((s) => s.elements)
-  const projectPath     = useGraphStore((s) => s.projectPath)
-  const setSelectedNode = useGraphStore((s) => s.setSelectedNode)
+  const selectedNode     = useGraphStore((s) => s.selectedNode)
+  const elements         = useGraphStore((s) => s.elements)
+  const projectPath      = useGraphStore((s) => s.projectPath)
+  const setSelectedNode  = useGraphStore((s) => s.setSelectedNode)
+  const requestFocusNode = useGraphStore((s) => s.requestFocusNode)
 
   const [collapsed, setCollapsed] = useState(false)
 
@@ -191,11 +210,11 @@ export function RightSidebar() {
                       const items = byType[t]
                       if (!items || items.length === 0) return []
                       return items.map(m => (
-                        <li key={m.id} className="rsb-list__item">
+                        <NodeRow key={m.id} id={m.id} onFocus={requestFocusNode}>
                           <span className="rsb-list__dot" style={{ background: NODE_CONFIG[m.type]?.color }} />
                           <span className="rsb-list__type">{TYPE_LABEL[m.type] ?? m.type}</span>
                           <span className="rsb-list__name rsb-mono">{m.label}</span>
-                        </li>
+                        </NodeRow>
                       ))
                     })}
                   </ul>
@@ -270,11 +289,11 @@ export function RightSidebar() {
                       <h4 className="rsb-section-title">Methods</h4>
                       <ul className="rsb-list">
                         {methods.map((c) => (
-                          <li key={c.id} className="rsb-list__item">
+                          <NodeRow key={c.id} id={c.id} onFocus={requestFocusNode}>
                             <span className="rsb-list__dot" style={{ background: NODE_CONFIG[c.type]?.color }} />
                             <span className="rsb-list__name rsb-mono">{c.label}</span>
                             {c.startLine && <span className="rsb-list__line">:{c.startLine}</span>}
-                          </li>
+                          </NodeRow>
                         ))}
                       </ul>
                     </section>
@@ -284,12 +303,12 @@ export function RightSidebar() {
                       <h4 className="rsb-section-title">Attributes</h4>
                       <ul className="rsb-list">
                         {variables.map((c) => (
-                          <li key={c.id} className="rsb-list__item">
+                          <NodeRow key={c.id} id={c.id} onFocus={requestFocusNode}>
                             <span className="rsb-list__dot" style={{ background: NODE_CONFIG[c.type]?.color }} />
                             {c.varType && <span className="rsb-list__type" style={{ fontWeight: 'bold', color: NODE_CONFIG.variable?.color }}>{c.varType}</span>}
                             <span className="rsb-list__name rsb-mono">{c.label}</span>
                             {c.startLine && <span className="rsb-list__line">:{c.startLine}</span>}
-                          </li>
+                          </NodeRow>
                         ))}
                       </ul>
                     </section>
@@ -304,11 +323,11 @@ export function RightSidebar() {
                 <h4 className="rsb-section-title">Contents{node.fileCount != null ? ` · ${node.fileCount} files` : ''}</h4>
                 <ul className="rsb-list">
                   {children.map((c) => (
-                    <li key={c.id} className="rsb-list__item">
+                    <NodeRow key={c.id} id={c.id} onFocus={requestFocusNode}>
                       <span className="rsb-list__dot" style={{ background: NODE_CONFIG[c.type]?.color }} />
                       <span className="rsb-list__type">{TYPE_LABEL[c.type] ?? c.type}</span>
                       <span className="rsb-list__name rsb-mono">{c.label}</span>
-                    </li>
+                    </NodeRow>
                   ))}
                 </ul>
               </section>
@@ -320,11 +339,11 @@ export function RightSidebar() {
                 <h4 className="rsb-section-title">Contents</h4>
                 <ul className="rsb-list">
                   {children.map((c) => (
-                    <li key={c.id} className="rsb-list__item">
+                    <NodeRow key={c.id} id={c.id} onFocus={requestFocusNode}>
                       <span className="rsb-list__dot" style={{ background: NODE_CONFIG[c.type]?.color }} />
                       <span className="rsb-list__type">{TYPE_LABEL[c.type]}</span>
                       <span className="rsb-list__name rsb-mono">{c.label}</span>
-                    </li>
+                    </NodeRow>
                   ))}
                 </ul>
               </section>
@@ -339,11 +358,11 @@ export function RightSidebar() {
                     const callee = nodeMap[e.target]
                     if (!callee) return null
                     return (
-                      <li key={e.id} className="rsb-list__item rsb-list__item--rel">
+                      <NodeRow key={e.id} id={callee.id} onFocus={requestFocusNode} className="rsb-list__item rsb-list__item--rel">
                         <span className="rsb-list__dot" style={{ background: NODE_CONFIG[callee.type]?.color }} />
                         <span className="rsb-list__type">{TYPE_LABEL[callee.type] ?? callee.type}</span>
                         <span className="rsb-list__name rsb-mono">{callee.fullLabel || callee.label}</span>
-                      </li>
+                      </NodeRow>
                     )
                   })}
                 </ul>
@@ -365,13 +384,13 @@ export function RightSidebar() {
                         const other   = nodeMap[otherId]
                         if (!other) return null
                         return (
-                          <li key={e.id} className="rsb-list__item rsb-list__item--rel">
+                          <NodeRow key={e.id} id={other.id} onFocus={requestFocusNode} className="rsb-list__item rsb-list__item--rel">
                             <span className="rsb-list__dot" style={{ background: NODE_CONFIG[other.type]?.color }} />
                             <span className="rsb-list__name">{other.fullLabel || other.label}</span>
                             {e.raw && (
                               <span className="rsb-import-line rsb-mono" title={e.raw}>{e.raw}</span>
                             )}
-                          </li>
+                          </NodeRow>
                         )
                       })}
                     </ul>

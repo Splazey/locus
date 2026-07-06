@@ -164,6 +164,9 @@ export function Sidebar() {
     toggleNodeType, toggleEdgeType, triggerRelayout, setPeerGap,
     projectPath, currentSave, dirty, viewMode,
     collapseAllFolders, expandAllFolders,
+    collapsedClusters, hiddenClusters,
+    toggleClusterCollapsed, toggleClusterHidden, isolateCluster,
+    collapseAllClusters, expandAllClusters,
     requestGoHome, buildSavePayload, setCurrentSave, clearDirty, setError,
   } = useGraphStore()
 
@@ -289,33 +292,84 @@ export function Sidebar() {
           </section>
         )}
 
-        {/* ── DEBUG: Cluster readout ─────────────────────────────────────── */}
-        {Object.keys(clusters).length > 0 && (
+        {/* ── Clusters (semantic mode) ───────────────────────────────────── */}
+        {viewMode === 'semantic' && Object.keys(clusters).length > 0 && (
           <section className="sidebar__section">
             <h3 className="sidebar__section-title" style={{ color: '#f472b6' }}>
-              Clusters (debug)
+              Clusters
             </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {Object.values(clusters).map(c => (
-                <div key={c.id} style={{
-                  background: '#1a0510',
-                  border: '1px solid #5c1a3a',
-                  borderRadius: 5,
-                  padding: '7px 9px',
-                }}>
-                  <p style={{ fontSize: 12, fontWeight: 600, color: '#f472b6', margin: 0 }}>
-                    {c.name}
-                  </p>
-                  {c.description && (
-                    <p style={{ fontSize: 11, color: '#8b949e', margin: '3px 0 0', lineHeight: 1.4 }}>
-                      {c.description}
+
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              <button
+                className="sidebar__btn"
+                style={{ flex: 1 }}
+                onClick={collapseAllClusters}
+                disabled={isLoading}
+                title="Collapse every cluster to a summary box"
+              >
+                Collapse all
+              </button>
+              <button
+                className="sidebar__btn"
+                style={{ flex: 1 }}
+                onClick={expandAllClusters}
+                disabled={isLoading}
+                title="Expand and show every cluster"
+              >
+                Expand all
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {Object.values(clusters).map(c => {
+                const isHidden    = hiddenClusters?.has(c.id)
+                const isCollapsed = collapsedClusters?.has(c.id)
+                return (
+                  <div key={c.id} style={{
+                    background: '#1a0510',
+                    border: `1px solid ${isHidden ? '#3a1226' : '#5c1a3a'}`,
+                    borderRadius: 5,
+                    padding: '7px 9px',
+                    opacity: isHidden ? 0.55 : 1,
+                  }}>
+                    <p style={{ fontSize: 12, fontWeight: 600, color: '#f472b6', margin: 0 }}>
+                      {c.name}
                     </p>
-                  )}
-                  <p style={{ fontSize: 10, color: '#484f58', margin: '4px 0 0' }}>
-                    {c.memberIds.length} member{c.memberIds.length !== 1 ? 's' : ''}
-                  </p>
-                </div>
-              ))}
+                    {c.description && (
+                      <p style={{ fontSize: 11, color: '#8b949e', margin: '3px 0 0', lineHeight: 1.4 }}>
+                        {c.description}
+                      </p>
+                    )}
+                    <p style={{ fontSize: 10, color: '#484f58', margin: '4px 0 0' }}>
+                      {c.memberIds.length} member{c.memberIds.length !== 1 ? 's' : ''}
+                    </p>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                      <button
+                        className="sidebar__cluster-action"
+                        onClick={() => toggleClusterCollapsed(c.id)}
+                        disabled={isHidden}
+                        title={isCollapsed ? 'Expand this cluster' : 'Collapse to a summary box'}
+                      >
+                        {isCollapsed ? 'Expand' : 'Collapse'}
+                      </button>
+                      <button
+                        className="sidebar__cluster-action"
+                        onClick={() => toggleClusterHidden(c.id)}
+                        title={isHidden ? 'Show this cluster' : 'Hide this cluster'}
+                      >
+                        {isHidden ? 'Show' : 'Hide'}
+                      </button>
+                      <button
+                        className="sidebar__cluster-action"
+                        onClick={() => isolateCluster(c.id)}
+                        title="Hide every other cluster (toggle)"
+                      >
+                        Isolate
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </section>
         )}

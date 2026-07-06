@@ -22,12 +22,17 @@ export const FileNode = memo(function FileNode({ data, position, size, selected,
   const { w }    = size  // square node: w === h
 
   // ── Normal-state header geometry ─────────────────────────────────────────
-  const estTextW = (data.label?.length ?? 0) * CHAR_W
-  const groupW   = ICON_W + GAP + estTextW
+  // The header scales up with the box so an expanded (zoomed-in) container's
+  // title stays legible instead of shrinking to a speck relative to the box.
+  const hScale     = Math.max(1, Math.min(w / 240, 4))
+  const headerFont = 13 * hScale
+  const iconW    = ICON_W * hScale
+  const gap      = GAP * hScale
+  const estTextW = (data.label?.length ?? 0) * CHAR_W * hScale
+  const groupW   = iconW + gap + estTextW
   const iconX    = x + w / 2 - groupW / 2
-  const textX    = iconX + ICON_W + GAP
-  const iconY    = y + 15
-  const textY    = y + 27
+  const textX    = iconX + iconW + gap
+  const headerTop = y + 12 * hScale
 
   // ── Collapsed-state geometry ─────────────────────────────────────────────
   // Target: label appears at ~14 px on screen regardless of zoom level.
@@ -49,12 +54,12 @@ export const FileNode = memo(function FileNode({ data, position, size, selected,
 
       {/* ── Normal state: icon + header label ───────────────────────────── */}
       <g style={{ opacity: collapsed ? 0 : 1, transition: 'opacity 0.3s ease', pointerEvents: 'none' }}>
-        <g transform={`translate(${iconX}, ${iconY}) scale(${ICON_W / 16})`}>
+        <g transform={`translate(${iconX}, ${headerTop}) scale(${iconW / 16})`}>
           <path d={ICON_PATH} fill={color} />
         </g>
         <text
-          x={textX} y={textY}
-          fill={text} fontSize="13" fontWeight="700"
+          x={textX} y={headerTop} dominantBaseline="hanging"
+          fill={text} fontSize={headerFont} fontWeight="700"
           style={{ userSelect: 'none' }}
         >
           {data.label}

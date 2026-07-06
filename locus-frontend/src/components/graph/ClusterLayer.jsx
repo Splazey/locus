@@ -120,50 +120,51 @@ function getRootId(id, nodeMap) {
   return cur
 }
 
-// ── Single blob component ─────────────────────────────────────────────────────
+/**
+ * Build the smooth-hull blob geometry for a set of member root boxes.
+ * Pure (no hooks) so it can be memoized on a cheap position signature.
+ * Returns '' path when fewer than 2 boxes are available.
+ */
+function buildBlobGeometry(rootIds, positions, sizes) {
+  const pts = []
+  for (const rid of rootIds) {
+    const p = positions[rid], s = sizes[rid]
+    if (!p || !s) continue
+    pts.push({ x: p.x, y: p.y }, { x: p.x + s.w, y: p.y },
+             { x: p.x + s.w, y: p.y + s.h }, { x: p.x, y: p.y + s.h })
+  }
+  if (pts.length < 2) return { path: '', labelX: 0, labelY: 0 }
 
-function ClusterBlob({ cluster, positions, sizes, nodeMap, selected, dimmed, onMouseDown }) {
-  const { path, labelX, labelY, cx, cy } = useMemo(() => {
-    // Collect root nodes for all members and gather bounding box corners
-    const rootIds = new Set()
-    for (const memberId of cluster.memberIds) {
-      const rootId = getRootId(memberId, nodeMap)
-      if (positions[rootId] && sizes[rootId]) rootIds.add(rootId)
-    }
+  const hull = convexHull(pts)
+  if (!hull) return { path: '', labelX: 0, labelY: 0 }
 
-    const pts = []
-    let minY = Infinity, topCx = 0
+  const expanded = expandHull(hull, BLOB_PADDING)
+  const ecx  = expanded.reduce((s, p) => s + p.x, 0) / expanded.length
+  const topY = expanded.reduce((mn, p) => Math.min(mn, p.y), Infinity)
+  return { path: smoothBlobPath(expanded), labelX: ecx, labelY: topY - LABEL_OFFSET }
+}
 
-    for (const rid of rootIds) {
-      const { x, y } = positions[rid]
-      const { w, h } = sizes[rid]
-      pts.push({ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h })
-      if (y < minY) { minY = y; topCx = x + w / 2 }
-    }
+// ── Expanded blob (smooth hull around member root boxes) ───────────────────────
 
-    if (pts.length < 2) return { path: '', labelX: 0, labelY: 0, cx: 0, cy: 0 }
+function ExpandedClusterBlob({ cluster, positions, sizes, nodeMap, selected, dimmed, onMouseDown, onContextMenu, onToggleCollapse }) {
+  // Build a cheap signature of member-root positions. The expensive convex-hull
+  // path only recomputes when this changes, so idle frames, pans and zooms (which
+  // don't move nodes) reuse the cached geometry instead of re-hulling every blob.
+  const rootIds = []
+  let signature = ''
+  for (const memberId of cluster.memberIds) {
+    const rootId = getRootId(memberId, nodeMap)
+    const p = positions[rootId], s = sizes[rootId]
+    if (!p || !s) continue
+    rootIds.push(rootId)
+    signature += `${rootId}:${Math.round(p.x)},${Math.round(p.y)};`
+  }
 
-    const hull     = convexHull(pts)
-    if (!hull)     return { path: '', labelX: 0, labelY: 0, cx: 0, cy: 0 }
-
-    const expanded = expandHull(hull, BLOB_PADDING)
-    const blobPath = smoothBlobPath(expanded)
-
-    // Centroid of expanded hull for label positioning
-    const ecx = expanded.reduce((s, p) => s + p.x, 0) / expanded.length
-    const ecy = expanded.reduce((s, p) => s + p.y, 0) / expanded.length
-    // Top-most y of expanded hull for label
-    const topY = expanded.reduce((mn, p) => Math.min(mn, p.y), Infinity)
-
-    return {
-      path:   blobPath,
-      labelX: ecx,
-      labelY: topY - LABEL_OFFSET,
-      cx:     ecx,
-      cy:     ecy,
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cluster.memberIds, positions, sizes, nodeMap])
+  const { path, labelX, labelY } = useMemo(
+    () => buildBlobGeometry(rootIds, positions, sizes),
+    [signature],  // recompute only when a member root actually moves
+  )
 
   if (!path) return null
 
@@ -192,7 +193,7 @@ function ClusterBlob({ cluster, positions, sizes, nodeMap, selected, dimmed, onM
           on top in z-order and capture their own clicks via stopPropagation —
           clicking a node still selects the node, not the cluster.
           Clicking empty space inside the blob (or the border itself) selects
-          the cluster. */}
+          the cluster; double-clicking collapses it to a summary box. */}
       <path
         d={path}
         fill={fill}
@@ -203,6 +204,8 @@ function ClusterBlob({ cluster, positions, sizes, nodeMap, selected, dimmed, onM
         strokeLinejoin="round"
         filter={selected ? `url(#${filterId})` : undefined}
         onMouseDown={onMouseDown}
+        onContextMenu={onContextMenu}
+        onDoubleClick={() => onToggleCollapse?.(cluster.id)}
         style={{ pointerEvents: 'all' }}
       />
 
@@ -219,9 +222,56 @@ function ClusterBlob({ cluster, positions, sizes, nodeMap, selected, dimmed, onM
         fontFamily="ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace"
         opacity={dimmed ? 0.4 : 0.9}
         onMouseDown={onMouseDown}
+        onContextMenu={onContextMenu}
+        onDoubleClick={() => onToggleCollapse?.(cluster.id)}
         style={{ cursor: 'pointer', userSelect: 'none' }}
       >
         {cluster.name}
+      </text>
+    </g>
+  )
+}
+
+// ── Collapsed cluster (compact summary box) ───────────────────────────────────
+
+function CollapsedClusterBox({ cluster, pos, sz, selected, dimmed, onMouseDown, onContextMenu, onToggleCollapse }) {
+  if (!pos || !sz) return null
+  const opacity = dimmed ? 0.3 : 1
+  const memberN = cluster.memberIds.length
+  return (
+    <g
+      opacity={opacity}
+      style={{ cursor: 'pointer' }}
+      onMouseDown={onMouseDown}
+      onContextMenu={onContextMenu}
+      onDoubleClick={() => onToggleCollapse?.(cluster.id)}
+    >
+      <rect
+        x={pos.x} y={pos.y} width={sz.w} height={sz.h}
+        rx={14} ry={14}
+        fill={selected ? SEL_FILL : FILL_COLOR}
+        stroke={STROKE_COLOR}
+        strokeWidth={selected ? 2.5 : 1.8}
+        strokeDasharray={selected ? '10 6' : '8 6'}
+        style={{ pointerEvents: 'all' }}
+      />
+      <text
+        x={pos.x + sz.w / 2} y={pos.y + sz.h / 2 - 6}
+        textAnchor="middle" dominantBaseline="middle"
+        fill={STROKE_COLOR} fontSize={14} fontWeight={selected ? 700 : 600}
+        fontFamily="ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace"
+        style={{ userSelect: 'none' }}
+      >
+        {cluster.name}
+      </text>
+      <text
+        x={pos.x + sz.w / 2} y={pos.y + sz.h / 2 + 16}
+        textAnchor="middle" dominantBaseline="middle"
+        fill={STROKE_COLOR} fontSize={11} opacity={0.7}
+        fontFamily="ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace"
+        style={{ userSelect: 'none' }}
+      >
+        {memberN} member{memberN === 1 ? '' : 's'} · double-click to expand
       </text>
     </g>
   )
@@ -236,24 +286,54 @@ export function ClusterLayer({
   nodeMap,
   selectedClusterId,
   linkedIds,
+  collapsedClusters,
+  hiddenClusters,
   onClusterMouseDown,
+  onClusterContextMenu,
+  onClusterToggleCollapse,
 }) {
   if (!clusters || Object.keys(clusters).length === 0) return null
 
   return (
     <g>
-      {Object.values(clusters).map(cluster => (
-        <ClusterBlob
-          key={cluster.id}
-          cluster={cluster}
-          positions={positions}
-          sizes={sizes}
-          nodeMap={nodeMap}
-          selected={selectedClusterId === cluster.id}
-          dimmed={linkedIds !== null && !linkedIds.has(cluster.id)}
-          onMouseDown={(e) => onClusterMouseDown(cluster.id, e)}
-        />
-      ))}
+      {Object.values(clusters).map(cluster => {
+        if (hiddenClusters?.has(cluster.id)) return null   // hidden: render nothing
+        const selected = selectedClusterId === cluster.id
+        const dimmed   = linkedIds !== null && !linkedIds.has(cluster.id)
+        const onMouseDown   = (e) => onClusterMouseDown(cluster.id, e)
+        const onContextMenu = (e) => onClusterContextMenu?.(cluster.id, e)
+
+        if (collapsedClusters?.has(cluster.id)) {
+          return (
+            <CollapsedClusterBox
+              key={cluster.id}
+              cluster={cluster}
+              pos={positions[cluster.id]}
+              sz={sizes[cluster.id]}
+              selected={selected}
+              dimmed={dimmed}
+              onMouseDown={onMouseDown}
+              onContextMenu={onContextMenu}
+              onToggleCollapse={onClusterToggleCollapse}
+            />
+          )
+        }
+
+        return (
+          <ExpandedClusterBlob
+            key={cluster.id}
+            cluster={cluster}
+            positions={positions}
+            sizes={sizes}
+            nodeMap={nodeMap}
+            selected={selected}
+            dimmed={dimmed}
+            onMouseDown={onMouseDown}
+            onContextMenu={onContextMenu}
+            onToggleCollapse={onClusterToggleCollapse}
+          />
+        )
+      })}
     </g>
   )
 }

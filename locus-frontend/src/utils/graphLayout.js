@@ -225,18 +225,42 @@ export function computeLayout(elements, collapsedFolders = new Set()) {
   return { positions, sizes }
 }
 
+// ── Semantic-mode (cluster) layout constants ────────────────────────────────
+// Gap between cluster blocks at the meta level.  Must exceed 2×BLOB_PADDING
+// (the per-side hull expansion in ClusterLayer, 52px) so two padded blobs can
+// never touch — 160 leaves ~56px of clear space between adjacent hulls.
+export const CLUSTER_GAP = 160
+// Empty band reserved at the top of each cluster block so the blob's label has
+// room above its members without colliding with the block above it.
+const CLUSTER_HEADER = 44
+// Fixed footprint of a collapsed-cluster summary box (keyed in positions/sizes
+// by the clusterId itself, since clusters are not real graph nodes).
+export const CLUSTER_SUMMARY = { minW: 210, h: 120 }
+const UNCLUSTERED_KEY = '__unclustered__'
+
 /**
  * computeSemanticLayout — layout for Semantic mode.
  *
- * File nodes are excluded entirely.  Classes and top-level functions whose
- * parent was a file become top-level nodes.  They are sorted by clusterId so
- * nodes in the same semantic cluster land adjacent to each other, letting the
- * cluster blob encircle a compact region.
+ * File/folder nodes are excluded.  Classes and top-level functions (whose file
+ * parent was removed), plus import nodes, become the top-level entities.  These
+ * are grouped by `clusterId` and each cluster is packed into its OWN block; the
+ * blocks are then packed on a meta-shelf with a generous `CLUSTER_GAP` between
+ * them.  This keeps every cluster's members contiguous (no interleaving across
+ * row wraps) and guarantees the padded cluster blobs never overlap.
  *
- * The class-children (methods, variables) are still sized and positioned
- * relative to their parent class box exactly as in computeLayout.
+ * Collapse / hide:
+ *   • A collapsed cluster contributes a single small summary box (keyed by its
+ *     clusterId) instead of laying out its members.
+ *   • A hidden cluster is skipped entirely — neither members nor a summary box.
+ *
+ * @param opts.collapsedClusters Set<clusterId> rendered as summary boxes
+ * @param opts.hiddenClusters    Set<clusterId> omitted from layout
+ * @returns { positions, sizes } where summary boxes use the clusterId as key.
  */
-export function computeSemanticLayout(elements) {
+export function computeSemanticLayout(elements, opts = {}) {
+  const collapsedClusters = opts.collapsedClusters ?? new Set()
+  const hiddenClusters    = opts.hiddenClusters ?? new Set()
+
   const allNodes = elements.filter(e => !e.data.source)
 
   // Collect file + folder IDs — these structural containers are excluded from
@@ -292,44 +316,75 @@ export function computeSemanticLayout(elements) {
     }
   }
 
-  // ── 3. Top-level nodes: classes/functions whose file-parent was removed,
-  //        plus import nodes (which never had a parent) ──────────────────────
+  // ── 3. Group top-level entities by cluster ───────────────────────────────
+  // Top-level = classes/functions whose file-parent was removed, plus imports.
   const topLevel = nodes.filter(n => !n.data.parent || fileIds.has(n.data.parent))
+  const areaOf   = id => { const s = sizes[id] ?? { w: 72, h: 72 }; return s.w * s.h }
 
-  // Sort by clusterId so members of the same cluster land adjacent
-  topLevel.sort((a, b) => {
-    const ca = a.data.clusterId ?? '￿'   // unclustered nodes sort last
-    const cb = b.data.clusterId ?? '￿'
-    if (ca !== cb) return ca < cb ? -1 : 1
-    // Within the same cluster put larger nodes first
-    const sa = sizes[a.data.id] ?? { w: 72, h: 72 }
-    const sb = sizes[b.data.id] ?? { w: 72, h: 72 }
-    return (sb.w * sb.h) - (sa.w * sa.h)
-  })
+  const groups = new Map()   // key → { clusterId|null, ids[] }
+  for (const n of topLevel) {
+    const cid = n.data.clusterId ?? null
+    const key = cid ?? UNCLUSTERED_KEY
+    if (!groups.has(key)) groups.set(key, { clusterId: cid, ids: [] })
+    groups.get(key).ids.push(n.data.id)
+  }
 
+  // ── 4. Build one block per cluster (members packed into a near-square) ───
+  const blocks = []   // { clusterId, kind, w, h, x?, y?, ids?, placed?, offY? }
+  for (const g of groups.values()) {
+    const cid = g.clusterId
+    if (cid && hiddenClusters.has(cid)) continue          // hidden: skip entirely
+
+    if (cid && collapsedClusters.has(cid)) {              // collapsed: summary box
+      blocks.push({ clusterId: cid, kind: 'summary', w: CLUSTER_SUMMARY.minW, h: CLUSTER_SUMMARY.h })
+      continue
+    }
+
+    const ids = [...g.ids].sort((a, b) => areaOf(b) - areaOf(a))
+    let kidArea = 0
+    for (const id of ids) kidArea += areaOf(id)
+    const targetW = Math.max(300, Math.sqrt(kidArea) * 1.3)
+    const { placed, contentW, contentH } = arrangeShelf(ids, sizes, H_GAP, targetW)
+    const headerH = cid ? CLUSTER_HEADER : 0   // clustered blocks reserve label space
+    blocks.push({
+      clusterId: cid, kind: 'members', ids, placed,
+      offY: headerH, w: contentW, h: contentH + headerH,
+    })
+  }
+
+  // ── 5. Meta-shelf-pack the blocks with CLUSTER_GAP between them ───────────
   let totalArea = 0
-  for (const n of topLevel) {
-    const s = sizes[n.data.id] ?? { w: 72, h: 72 }
-    totalArea += s.w * s.h
-  }
-  const targetRowW = Math.max(900, Math.sqrt(totalArea) * 1.4)
+  for (const b of blocks) totalArea += b.w * b.h
+  const metaTargetW = Math.max(1200, Math.sqrt(totalArea) * 1.4)
 
-  const positions = {}
   let x = 60, y = 60, rowH = 0
-  for (const n of topLevel) {
-    const id = n.data.id
-    const s  = sizes[id] ?? { w: 72, h: 72 }
-    if (x > 60 && x + s.w > 60 + targetRowW) { x = 60; y += rowH + 80; rowH = 0 }
-    positions[id] = { x, y }
-    x += s.w + 80
-    rowH = Math.max(rowH, s.h)
+  for (const b of blocks) {
+    if (x > 60 && x + b.w > 60 + metaTargetW) { x = 60; y += rowH + CLUSTER_GAP; rowH = 0 }
+    b.x = x; b.y = y
+    x += b.w + CLUSTER_GAP
+    rowH = Math.max(rowH, b.h)
   }
 
-  // ── 4. Absolute positions for class children ─────────────────────────────
+  // ── 6. Emit absolute positions ───────────────────────────────────────────
+  const positions = {}
+  for (const b of blocks) {
+    if (b.kind === 'summary') {
+      // Summary boxes are keyed by clusterId (not a real node id).
+      positions[b.clusterId] = { x: b.x, y: b.y }
+      sizes[b.clusterId]     = { w: b.w, h: b.h }
+      continue
+    }
+    for (const id of b.ids) {
+      const r = b.placed[id] ?? { x: 0, y: 0 }
+      positions[id] = { x: b.x + r.x, y: b.y + b.offY + r.y }
+    }
+  }
+
+  // ── 7. Absolute positions for class children (placed classes only) ───────
   for (const n of nodes) {
     if (n.data.type !== 'class') continue
     const cp = positions[n.data.id]
-    if (!cp) continue
+    if (!cp) continue   // class lives in a collapsed/hidden cluster — skip
     const sz  = sizes[n.data.id]
     const rel = relPos[n.data.id] ?? {}
     const { contentW, contentH } = content[n.data.id] ?? { contentW: 0, contentH: 0 }

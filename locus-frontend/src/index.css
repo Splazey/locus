@@ -152,6 +152,24 @@ body { background: var(--bg-app); color: var(--text-primary); }
 .sidebar__btn--icon   { padding: 5px 8px; flex-shrink: 0; }
 .sidebar__btn--full   { width: 100%; margin-top: 0; }
 
+/* ── Per-cluster action buttons (semantic Clusters panel) ─────────────────── */
+.sidebar__cluster-action {
+  flex: 1;
+  border: 1px solid #5c1a3a;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #f472b6;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 3px 6px;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  white-space: nowrap;
+}
+.sidebar__cluster-action:hover:not(:disabled) { background: #2a0a1a; }
+.sidebar__cluster-action:disabled { opacity: 0.4; cursor: default; }
+
 /* ── Node Spacing slider ──────────────────────────────────────────────────── */
 .sidebar__slider-row {
   margin-bottom: 10px;
@@ -510,6 +528,24 @@ body { background: var(--bg-app); color: var(--text-primary); }
 }
 
 .rsb-list__item--rel { flex-wrap: wrap; }
+
+/* Clickable node rows — reset the button chrome and add a hover affordance. */
+.rsb-list__item--btn {
+  width: calc(100% + 12px);
+  margin: 0 -6px;
+  padding-left: 6px;
+  padding-right: 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.rsb-list__item--btn:hover { background: #1f2630; }
+.rsb-list__item--btn:focus-visible { outline: 1px solid #388bfd; outline-offset: -1px; }
 
 .rsb-list__dot {
   width: 6px;

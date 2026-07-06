@@ -26,12 +26,17 @@ export const FolderNode = memo(function FolderNode({
   const countTxt = `${count} file${count === 1 ? '' : 's'}`
 
   // ── Normal-state header geometry ─────────────────────────────────────────
-  const estTextW = (data.label?.length ?? 0) * CHAR_W
-  const groupW   = ICON_W + GAP + estTextW
-  const iconX    = x + 18
-  const textX    = iconX + ICON_W + GAP
-  const iconY    = y + 14
-  const textY    = y + 27
+  // Scale the header with the box so an expanded folder's title stays legible.
+  const hScale     = Math.max(1, Math.min(w / 260, 4))
+  const headerFont = 13.5 * hScale
+  const iconW    = ICON_W * hScale
+  const gap      = GAP * hScale
+  const estTextW = (data.label?.length ?? 0) * CHAR_W * hScale
+  const groupW   = iconW + gap + estTextW
+  const iconX    = x + 18 * hScale
+  const textX    = iconX + iconW + gap
+  const headerTop = y + 12 * hScale
+  const countY    = headerTop + headerFont + 6 * hScale
 
   // ── Collapsed-state geometry ─────────────────────────────────────────────
   const cx       = x + w / 2
@@ -64,13 +69,13 @@ export const FolderNode = memo(function FolderNode({
 
       {/* ── Expanded state: icon + header label + count ──────────────────── */}
       <g style={{ opacity: collapsed ? 0 : 1, transition: 'opacity 0.25s ease', pointerEvents: 'none' }}>
-        <g transform={`translate(${iconX}, ${iconY}) scale(${ICON_W / 16})`}>
+        <g transform={`translate(${iconX}, ${headerTop}) scale(${iconW / 16})`}>
           <path d={ICON_PATH} fill={color} />
         </g>
-        <text x={textX} y={textY} fill={text} fontSize="13.5" fontWeight="700" style={{ userSelect: 'none' }}>
+        <text x={textX} y={headerTop} dominantBaseline="hanging" fill={text} fontSize={headerFont} fontWeight="700" style={{ userSelect: 'none' }}>
           {data.label}
         </text>
-        <text x={x + 18} y={y + 44} fill={color} fontSize="10.5" fontWeight="600" opacity="0.85" style={{ userSelect: 'none' }}>
+        <text x={iconX} y={countY} dominantBaseline="hanging" fill={color} fontSize={10.5 * hScale} fontWeight="600" opacity="0.85" style={{ userSelect: 'none' }}>
           {countTxt}
         </text>
       </g>

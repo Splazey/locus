@@ -4,6 +4,7 @@ import { NODE_CONFIG } from '../../constants/nodeConfig'
 import { computeLayout, computeSemanticLayout, FOLDER as FOLDER_PAD, FILE as FILE_PAD, CLASS as CLASS_PAD } from '../../utils/graphLayout'
 import { EdgeLayer }    from './EdgeLayer'
 import { ClusterLayer } from './ClusterLayer'
+import { ContextMenu }  from './ContextMenu'
 import { Minimap }      from './Minimap'
 import { FolderNode }   from './nodes/FolderNode'
 import { FileNode }     from './nodes/FileNode'
@@ -18,6 +19,19 @@ import { VariableNode } from './nodes/VariableNode'
 const MIN_ZOOM       = 0.02   // low enough to frame very large graphs in one view
 const MAX_ZOOM       = 5
 const MOVE_THRESHOLD = 4
+
+// Delay (ms) a pointer must rest on a node before its name tooltip appears.
+const HOVER_DELAY = 450
+
+const isElectron = typeof window !== 'undefined' && !!window.electronAPI
+
+/** Extract the source-file relative path encoded in a node id (imp/import nodes have none). */
+function fileFromId(nodeId) {
+  if (!nodeId || nodeId.startsWith('imp:')) return null
+  if (nodeId.startsWith('import_module:') || nodeId.startsWith('import_entity:')) return null
+  const parts = nodeId.split(':')
+  return parts.length >= 2 ? parts[1] : null
+}
 
 // Leaf node types — used to classify edges into leaf vs deep layers.
 const LEAF_TYPES = new Set(['function', 'method', 'import', 'import_module', 'import_entity', 'variable'])
@@ -202,6 +216,19 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   const storeColors      = useGraphStore((s) => s.nodeColors)
   const collapsedFolders = useGraphStore((s) => s.collapsedFolders)
   const toggleFolder     = useGraphStore((s) => s.toggleFolder)
+  const collapsedClusters     = useGraphStore((s) => s.collapsedClusters)
+  const hiddenClusters        = useGraphStore((s) => s.hiddenClusters)
+  const toggleClusterCollapsed = useGraphStore((s) => s.toggleClusterCollapsed)
+  const toggleClusterHidden    = useGraphStore((s) => s.toggleClusterHidden)
+  const moveNodeToCluster      = useGraphStore((s) => s.moveNodeToCluster)
+  const createCluster          = useGraphStore((s) => s.createCluster)
+  const deleteCluster          = useGraphStore((s) => s.deleteCluster)
+  const updateClusterMetadata  = useGraphStore((s) => s.updateClusterMetadata)
+  const contextMenu            = useGraphStore((s) => s.contextMenu)
+  const openContextMenu        = useGraphStore((s) => s.openContextMenu)
+  const closeContextMenu       = useGraphStore((s) => s.closeContextMenu)
+  const storeSelectedNode      = useGraphStore((s) => s.selectedNode)
+  const focusRequest           = useGraphStore((s) => s.focusRequest)
   // Merge store overrides with NODE_CONFIG defaults so every type always has a color
   const nodeColors = useMemo(() => {
     const merged = {}
@@ -224,6 +251,11 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   const [selectedId,       setSelectedId]       = useState(null)
   const [svgSize,          setSvgSize]          = useState({ w: 0, h: 0 })
   const [searchQuery,      setSearchQuery]      = useState('')
+  const [hoverTip,         setHoverTip]         = useState(null)  // { label, x, y } | null
+  const [searchOpen,       setSearchOpen]       = useState(false)
+  const [searchActiveIdx,  setSearchActiveIdx]  = useState(0)
+  const hoverTimerRef = useRef(null)
+  const searchInputRef = useRef(null)
 
   // Refs used inside the rAF loop and stable callbacks (avoid stale closures)
   const posRef              = useRef({})         // mirror of `positions` state
@@ -238,9 +270,15 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   // Tracks the live peerGap value so all callbacks always read the latest figure.
   const peerGapRef          = useRef(peerGap)
 
+  // Mirror of `viewport` so stable callbacks (startPan) read the latest camera
+  // without taking viewport.x/y as deps — otherwise they'd be rebuilt every pan
+  // frame, thrashing the per-node handler cache and defeating React.memo.
+  const viewportRef = useRef(viewport)
+
   useEffect(() => { posRef.current    = positions }, [positions])
   useEffect(() => { sizesRef.current  = sizes     }, [sizes])
   useEffect(() => { peerGapRef.current = peerGap  }, [peerGap])
+  useEffect(() => { viewportRef.current = viewport }, [viewport])
 
   // ── Derived maps ──────────────────────────────────────────────────────────────
   const nodes = useMemo(() => elements.filter(e => !e.data.source), [elements])
@@ -303,15 +341,33 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     return s
   }, [nodes, sizes, viewport.zoom]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Folder collapse: all descendants of a collapsed folder are hidden ─────
-  // Only applies in structural mode; semantic mode ignores folder structure.
+  // ── Hidden nodes ─────────────────────────────────────────────────────────
+  // Structural mode: every descendant of a collapsed folder.
+  // Semantic mode: every member (and descendants) of a collapsed OR hidden
+  // cluster — these are removed from the DOM so large semantic graphs render
+  // only the currently-expanded clusters.
   const hiddenIds = useMemo(() => {
     const s = new Set()
-    if (viewMode === 'semantic' || !collapsedFolders || collapsedFolders.size === 0) return s
     const mark = id => { for (const k of childrenOf[id] ?? []) { s.add(k); mark(k) } }
+
+    if (viewMode === 'semantic') {
+      const hide = new Set([
+        ...(collapsedClusters ?? []),
+        ...(hiddenClusters ?? []),
+      ])
+      if (hide.size === 0) return s
+      for (const cid of hide) {
+        const cl = clusters[cid]
+        if (!cl) continue
+        for (const mid of cl.memberIds) { s.add(mid); mark(mid) }
+      }
+      return s
+    }
+
+    if (!collapsedFolders || collapsedFolders.size === 0) return s
     for (const fid of collapsedFolders) mark(fid)
     return s
-  }, [collapsedFolders, childrenOf, viewMode])
+  }, [collapsedFolders, collapsedClusters, hiddenClusters, clusters, childrenOf, viewMode])
 
   // ── Animation loop — exponential ease-out ─────────────────────────────────────
   // Each frame: display += (target − display) × EASE_FACTOR
@@ -404,18 +460,24 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   // Saved positions (from a loaded save, or committed by earlier drags) take
   // precedence over the computed layout — except on an explicit re-layout
   // (layoutKey bump), which discards them for this mode.
-  const prevLayoutKeyRef = useRef(layoutKey)
-  const prevCollapseRef  = useRef(collapsedFolders)
+  const prevLayoutKeyRef    = useRef(layoutKey)
+  const prevCollapseRef     = useRef(collapsedFolders)
+  const prevClusterCollapse = useRef(collapsedClusters)
+  const prevClusterHidden   = useRef(hiddenClusters)
   useEffect(() => {
-    // A collapse/expand toggle re-runs layout but should NOT refit the viewport
-    // or clear the selection — only a graph/mode/relayout change does that.
+    // A collapse/expand/hide toggle re-runs layout but should NOT refit the
+    // viewport or clear the selection — only a graph/mode/relayout change does.
     const collapseOnly =
-      prevCollapseRef.current !== collapsedFolders &&
-      layoutKey === prevLayoutKeyRef.current
-    prevCollapseRef.current = collapsedFolders
+      layoutKey === prevLayoutKeyRef.current &&
+      (prevCollapseRef.current     !== collapsedFolders  ||
+       prevClusterCollapse.current !== collapsedClusters ||
+       prevClusterHidden.current   !== hiddenClusters)
+    prevCollapseRef.current     = collapsedFolders
+    prevClusterCollapse.current = collapsedClusters
+    prevClusterHidden.current   = hiddenClusters
 
     const { positions: lp, sizes: s } = viewMode === 'semantic'
-      ? computeSemanticLayout(elements)
+      ? computeSemanticLayout(elements, { collapsedClusters, hiddenClusters })
       : computeLayout(elements, collapsedFolders)
 
     let p = lp
@@ -449,7 +511,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     setSelectedId(null)
     const t = setTimeout(() => fitToContent(p, s), 50)
     return () => clearTimeout(t)
-  }, [elements, layoutKey, viewMode, collapsedFolders, fitToContent])
+  }, [elements, layoutKey, viewMode, collapsedFolders, collapsedClusters, hiddenClusters, fitToContent])
 
   // Re-settle all nodes when the peerGap changes (slider released).
   // Skipped on first mount (restPosRef is empty until a graph loads).
@@ -594,17 +656,54 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
 
   // ── Interaction handlers ───────────────────────────────────────────────────────
 
-  const onBgDown = useCallback(e => {
+  // Dismiss the hover tooltip (called on any drag/pan start).
+  const hideTip = useCallback(() => {
+    clearTimeout(hoverTimerRef.current)
+    setHoverTip(null)
+  }, [])
+
+  // Begin a camera pan. Panning is bound to the MIDDLE mouse button only, and
+  // works uniformly whether the pointer is over the background or a node.
+  const startPan = useCallback(e => {
+    hideTip()
     movedRef.current = false
     const rect = svgRef.current.getBoundingClientRect()
+    const vp   = viewportRef.current
+    panRef.current = {
+      startMx: e.clientX - rect.left, startMy: e.clientY - rect.top,
+      startVx: vp.x,                  startVy: vp.y,
+      pan: true,
+    }
+  }, [hideTip])
+
+  const onBgDown = useCallback(e => {
+    if (e.button === 1) {          // middle-click → pan camera
+      e.preventDefault()
+      startPan(e)
+      return
+    }
+    if (e.button !== 0) return     // ignore right — opens the context menu
+    movedRef.current = false
+    const rect = svgRef.current.getBoundingClientRect()
+    // Left-press on empty background: track it so a plain click (no drag)
+    // deselects on mouseup, but do NOT pan — panning is middle-click only.
     panRef.current = {
       startMx: e.clientX - rect.left, startMy: e.clientY - rect.top,
       startVx: viewport.x,            startVy: viewport.y,
+      pan: false,
     }
-  }, [viewport.x, viewport.y])
+  }, [viewport.x, viewport.y, startPan])
 
   const onNodeDown = useCallback(id => e => {
+    if (e.button === 1) {          // middle-click over a node → pan camera
+      e.preventDefault()
+      e.stopPropagation()
+      startPan(e)
+      return
+    }
+    if (e.button !== 0) return    // ignore right-click — handled by onContextMenu
     e.stopPropagation()
+    hideTip()
     movedRef.current = false
     const rect = svgRef.current.getBoundingClientRect()
 
@@ -638,7 +737,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       startMy: e.clientY - rect.top,
       startPositions,
     }
-  }, [getDescendants, nodeMap, childrenOf])
+  }, [getDescendants, nodeMap, childrenOf, startPan, hideTip])
 
   // Per-id handler cache: `onNodeDown(id)` builds a fresh closure each call, which
   // would defeat React.memo on the node components (onMouseDown prop would change
@@ -719,7 +818,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       const p  = panRef.current
       const dx = mx - p.startMx, dy = my - p.startMy
       if (Math.abs(dx) > MOVE_THRESHOLD || Math.abs(dy) > MOVE_THRESHOLD) movedRef.current = true
-      setViewport(vp => ({ ...vp, x: p.startVx + dx, y: p.startVy + dy }))
+      if (p.pan) setViewport(vp => ({ ...vp, x: p.startVx + dx, y: p.startVy + dy }))
     }
   }, [viewport.zoom, repelPeers, applyPeerUpdates])
 
@@ -867,12 +966,132 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
 
   // ── Cluster blob mousedown (sets clusterClickRef for onMouseUp) ──────────────
   const onClusterMouseDown = useCallback((clusterId, e) => {
+    if (e.button === 1) {         // middle-click over a cluster → pan camera
+      e.preventDefault()
+      e.stopPropagation()
+      startPan(e)
+      return
+    }
+    if (e.button !== 0) return    // ignore right-click — handled by onContextMenu
     e.stopPropagation()
     movedRef.current        = false
     clusterClickRef.current = clusterId
     dragRef.current         = null
     panRef.current          = null
-  }, [])
+  }, [startPan])
+
+  // ── Context menus ───────────────────────────────────────────────────────────
+  // Build the items for a node's right-click menu. Only meaningful in semantic
+  // view (clusters aren't visible otherwise) — restricted at the call site.
+  const buildNodeMenuItems = useCallback((nodeData) => {
+    const nodeId        = nodeData.id
+    const currentCid    = nodeData.clusterId ?? null
+    const clusterValues = Object.values(clusters)
+    const moveTargets   = clusterValues
+      .filter(c => c.id !== currentCid)
+      .map(c => ({
+        type: 'action',
+        label: c.name || c.id,
+        onClick: () => moveNodeToCluster(nodeId, c.id),
+      }))
+
+    return [
+      {
+        type: 'submenu',
+        label: 'Move to cluster',
+        items: moveTargets,
+      },
+      {
+        type: 'input',
+        label: 'Move to new cluster…',
+        placeholder: 'Cluster name',
+        submitLabel: 'Create & move',
+        onSubmit: (name) => {
+          createCluster({ name, memberIds: [nodeId] })
+        },
+      },
+      {
+        type: 'action',
+        label: 'Remove from cluster',
+        disabled: !currentCid,
+        onClick: () => moveNodeToCluster(nodeId, null),
+      },
+    ]
+  }, [clusters, moveNodeToCluster, createCluster])
+
+  const buildClusterMenuItems = useCallback((clusterId) => {
+    const cluster = clusters[clusterId]
+    if (!cluster) return []
+    const isCollapsed = collapsedClusters?.has(clusterId)
+    const isHidden    = hiddenClusters?.has(clusterId)
+    return [
+      {
+        type: 'input',
+        label: 'Rename…',
+        placeholder: 'Cluster name',
+        initial: cluster.name ?? '',
+        submitLabel: 'Save',
+        onSubmit: (name) => updateClusterMetadata(clusterId, { name }),
+      },
+      {
+        type: 'input',
+        label: 'Edit description…',
+        placeholder: 'Short summary',
+        initial: cluster.description ?? '',
+        multiline: true,
+        submitLabel: 'Save',
+        allowEmpty: true,
+        onSubmit: (description) => updateClusterMetadata(clusterId, { description }),
+      },
+      { type: 'separator' },
+      {
+        type: 'action',
+        label: isCollapsed ? 'Expand' : 'Collapse',
+        onClick: () => toggleClusterCollapsed(clusterId),
+      },
+      {
+        type: 'action',
+        label: isHidden ? 'Unhide' : 'Hide',
+        onClick: () => toggleClusterHidden(clusterId),
+      },
+      { type: 'separator' },
+      {
+        type: 'action',
+        label: 'Delete cluster',
+        onClick: () => deleteCluster(clusterId),
+      },
+    ]
+  }, [clusters, collapsedClusters, hiddenClusters,
+      updateClusterMetadata, toggleClusterCollapsed, toggleClusterHidden, deleteCluster])
+
+  const buildCanvasMenuItems = useCallback(() => [
+    {
+      type: 'input',
+      label: 'Create empty cluster…',
+      placeholder: 'Cluster name',
+      submitLabel: 'Create',
+      onSubmit: (name) => createCluster({ name }),
+    },
+  ], [createCluster])
+
+  const onNodeContextMenu = useCallback((nodeData, e) => {
+    if (viewMode !== 'semantic') return      // clusters aren't visible — no-op
+    e.preventDefault()
+    e.stopPropagation()
+    openContextMenu(e.clientX, e.clientY, buildNodeMenuItems(nodeData))
+  }, [viewMode, openContextMenu, buildNodeMenuItems])
+
+  const onClusterContextMenu = useCallback((clusterId, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    openContextMenu(e.clientX, e.clientY, buildClusterMenuItems(clusterId))
+  }, [openContextMenu, buildClusterMenuItems])
+
+  const onCanvasContextMenu = useCallback((e) => {
+    if (viewMode !== 'semantic') return
+    e.preventDefault()
+    openContextMenu(e.clientX, e.clientY, buildCanvasMenuItems())
+  }, [viewMode, openContextMenu, buildCanvasMenuItems])
 
   // ── Zoom helpers ──────────────────────────────────────────────────────────────
   const zoomBy = useCallback(factor => {
@@ -905,10 +1124,18 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
   }, [])
 
   // Keyboard navigation: +/= zoom in, -/_ zoom out, 0 fit, 1 reset to 100%.
-  // Ignored while typing in an input/textarea (e.g. the search box).
+  // Ctrl/Cmd+F opens the centred search overlay from anywhere (even the search
+  // input itself, so re-pressing while open just keeps focus there).
+  // Ignored while typing in an unrelated input/textarea.
   // Placed after zoomBy/fitView/resetZoom are declared to avoid temporal dead zone.
   useEffect(() => {
     const onKey = e => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault()
+        setSearchOpen(true)
+        setSearchActiveIdx(0)
+        return
+      }
       const tag = e.target?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return
       if (e.metaKey || e.ctrlKey || e.altKey) return
@@ -920,6 +1147,17 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [zoomBy, fitView, resetZoom])
+
+  // Focus the search input as soon as the overlay mounts.
+  useEffect(() => {
+    if (searchOpen) {
+      const t = setTimeout(() => searchInputRef.current?.focus(), 0)
+      return () => clearTimeout(t)
+    } else {
+      setSearchQuery('')
+      setSearchActiveIdx(0)
+    }
+  }, [searchOpen])
 
   // Center the viewport on a node at a comfortable zoom (reads latest geometry).
   const centerOnNode = useCallback((id) => {
@@ -957,6 +1195,71 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
       centerOnNode(id)
     }
   }, [nodeMap, onNodeSelect, centerOnNode])
+
+  // Choose a search result: select + center on it, then close the overlay.
+  const chooseSearchResult = useCallback((id) => {
+    focusNode(id)
+    setSearchOpen(false)
+  }, [focusNode])
+
+  // Keep a live ref to focusNode so the focus-request effect can call the latest
+  // version without re-subscribing every time the graph geometry changes.
+  const focusNodeRef = useRef(focusNode)
+  useEffect(() => { focusNodeRef.current = focusNode }, [focusNode])
+
+  // Right-sidebar node clicks route through the store as focus requests: select
+  // the node and glide the camera onto it.
+  useEffect(() => {
+    if (focusRequest?.id) focusNodeRef.current(focusRequest.id)
+  }, [focusRequest])
+
+  // When the selection is cleared elsewhere (e.g. the right sidebar's close
+  // button), drop the canvas highlight too so the two stay in sync.
+  useEffect(() => {
+    if (!storeSelectedNode) setSelectedId(null)
+  }, [storeSelectedNode])
+
+  // Open a leaf entity (function / method / variable) at its line in the IDE.
+  const openInIDE = useCallback((data) => {
+    if (!isElectron || !data) return
+    const relFile = data.type === 'file' ? data.fullLabel : fileFromId(data.id)
+    if (!relFile) return
+    const projectPath = useGraphStore.getState().projectPath
+    const absPath = projectPath ? `${projectPath}/${relFile}`.replace(/\\/g, '/') : relFile
+    window.electronAPI.openFile(absPath, data.startLine ?? null)
+  }, [])
+
+  // Double-click behaviour: sub-entities open in the IDE; classes zoom in.
+  const onNodeDoubleClick = useCallback((data) => {
+    if (!data) return
+    if (data.type === 'class') { centerOnNode(data.id); return }
+    if (data.type === 'function' || data.type === 'method' || data.type === 'variable') {
+      openInIDE(data)
+    }
+  }, [centerOnNode, openInIDE])
+
+  // ── Hover tooltip (node name after a short dwell) ─────────────────────────
+  const onNodeEnter = useCallback((data, e) => {
+    const cx = e.clientX, cy = e.clientY
+    clearTimeout(hoverTimerRef.current)
+    hoverTimerRef.current = setTimeout(() => {
+      const rect = svgRef.current?.getBoundingClientRect()
+      if (!rect) return
+      setHoverTip({ label: data.fullLabel || data.label, x: cx - rect.left, y: cy - rect.top })
+    }, HOVER_DELAY)
+  }, [])
+
+  const onNodeLeave = useCallback(() => {
+    clearTimeout(hoverTimerRef.current)
+    setHoverTip(null)
+  }, [])
+
+  // Stable per-node wrapper props (hover + double-click) — memoized by id.
+  const hoverProps = useCallback((data) => ({
+    onMouseEnter:  (e) => onNodeEnter(data, e),
+    onMouseLeave:  onNodeLeave,
+    onDoubleClick: () => onNodeDoubleClick(data),
+  }), [onNodeEnter, onNodeLeave, onNodeDoubleClick])
 
   // ── Search results (by label / full path) ─────────────────────────────────
   const searchResults = useMemo(() => {
@@ -1171,6 +1474,7 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
         onMouseDown={onBgDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
+        onContextMenu={onCanvasContextMenu}
       >
         <g transform={`translate(${viewport.x},${viewport.y}) scale(${viewport.zoom})`}>
 
@@ -1182,25 +1486,31 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
               nodeMap={clusterNodeMap}
               selectedClusterId={selectedId}
               linkedIds={linkedIds}
+              collapsedClusters={collapsedClusters}
+              hiddenClusters={hiddenClusters}
               onClusterMouseDown={onClusterMouseDown}
+              onClusterContextMenu={onClusterContextMenu}
+              onClusterToggleCollapse={toggleClusterCollapsed}
             />
           )}
 
-          {/* Folder containers — outermost boxes, drawn at the back */}
+          {/* Folder containers — outermost boxes, drawn at the back.
+              No context menu here: folders aren't cluster members. */}
           {folderNodes.map(n => (
-            <FolderNode
-              key={n.data.id}
-              data={n.data}
-              position={dp[n.data.id]}
-              size={sizes[n.data.id]}
-              selected={selectedId === n.data.id}
-              dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
-              onMouseDown={nodeDownFor(n.data.id)}
-              collapsed={collapsedFolders.has(n.data.id)}
-              zoom={viewport.zoom}
-              color={nodeColors.folder}
-              onToggle={toggleFolder}
-            />
+            <g key={n.data.id} {...hoverProps(n.data)}>
+              <FolderNode
+                data={n.data}
+                position={dp[n.data.id]}
+                size={sizes[n.data.id]}
+                selected={selectedId === n.data.id}
+                dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
+                onMouseDown={nodeDownFor(n.data.id)}
+                collapsed={collapsedFolders.has(n.data.id)}
+                zoom={viewport.zoom}
+                color={nodeColors.folder}
+                onToggle={toggleFolder}
+              />
+            </g>
           ))}
 
           {/* Deep edges: ≥1 container endpoint — render below file/class nodes */}
@@ -1220,33 +1530,35 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
           />
 
           {fileNodes.map(n => (
-            <FileNode
-              key={n.data.id}
-              data={n.data}
-              position={dp[n.data.id]}
-              size={sizes[n.data.id]}
-              selected={selectedId === n.data.id}
-              dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
-              onMouseDown={nodeDownFor(n.data.id)}
-              collapsed={collapsedIds.has(n.data.id)}
-              zoom={viewport.zoom}
-              color={nodeColors.file}
-            />
+            <g key={n.data.id} onContextMenu={(e) => onNodeContextMenu(n.data, e)} {...hoverProps(n.data)}>
+              <FileNode
+                data={n.data}
+                position={dp[n.data.id]}
+                size={sizes[n.data.id]}
+                selected={selectedId === n.data.id}
+                dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
+                onMouseDown={nodeDownFor(n.data.id)}
+                collapsed={collapsedIds.has(n.data.id)}
+                zoom={viewport.zoom}
+                color={nodeColors.file}
+              />
+            </g>
           ))}
 
           {classNodes.map(n => (
-            <ClassNode
-              key={n.data.id}
-              data={n.data}
-              position={dp[n.data.id]}
-              size={sizes[n.data.id]}
-              selected={selectedId === n.data.id}
-              dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
-              onMouseDown={nodeDownFor(n.data.id)}
-              collapsed={collapsedIds.has(n.data.id)}
-              zoom={viewport.zoom}
-              color={nodeColors.class}
-            />
+            <g key={n.data.id} onContextMenu={(e) => onNodeContextMenu(n.data, e)} {...hoverProps(n.data)}>
+              <ClassNode
+                data={n.data}
+                position={dp[n.data.id]}
+                size={sizes[n.data.id]}
+                selected={selectedId === n.data.id}
+                dimmed={linkedIds !== null && !linkedIds.has(n.data.id)}
+                onMouseDown={nodeDownFor(n.data.id)}
+                collapsed={collapsedIds.has(n.data.id)}
+                zoom={viewport.zoom}
+                color={nodeColors.class}
+              />
+            </g>
           ))}
 
           {/* Leaf edges: both endpoints are leaf nodes — render above containers, below leaf nodes */}
@@ -1265,53 +1577,124 @@ export function GraphRenderer({ elements, clusters = {}, visibleTypes, visibleEd
             leafEdgesOnly={true}
           />
 
-          {leafNodes.map(renderLeaf)}
+          {leafNodes.map(n => (
+            <g key={n.data.id} onContextMenu={(e) => onNodeContextMenu(n.data, e)} {...hoverProps(n.data)}>
+              {renderLeaf(n)}
+            </g>
+          ))}
         </g>
       </svg>
 
-      {/* ── Search-to-focus ─────────────────────────────────────────────── */}
-      <div style={{ position: 'absolute', top: 14, left: 14, width: 260, zIndex: 5 }}>
-        <input
-          value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === 'Enter' && searchResults[0]) { focusNode(searchResults[0].id); e.preventDefault() }
-            else if (e.key === 'Escape') setSearchQuery('')
-          }}
-          placeholder="Search nodes…"
-          spellCheck={false}
-          style={{
-            width: '100%', boxSizing: 'border-box', padding: '7px 10px',
-            background: '#0d1117', border: '1px solid #30363d', borderRadius: 6,
-            color: '#e6edf3', fontSize: 13, fontFamily: 'inherit', outline: 'none',
-          }}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={closeContextMenu}
         />
-        {searchResults.length > 0 && (
-          <ul style={{
-            listStyle: 'none', margin: '4px 0 0', padding: 4, maxHeight: 320, overflowY: 'auto',
-            background: '#161b22', border: '1px solid #30363d', borderRadius: 6,
-          }}>
-            {searchResults.map(r => (
-              <li
-                key={r.id}
-                onClick={() => focusNode(r.id)}
-                title={r.full || r.label}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px',
-                  borderRadius: 4, cursor: 'pointer', fontSize: 12.5,
-                  background: selectedId === r.id ? '#1f2630' : 'transparent',
-                }}
-                onMouseEnter={e => { e.currentTarget.style.background = '#1f2630' }}
-                onMouseLeave={e => { e.currentTarget.style.background = selectedId === r.id ? '#1f2630' : 'transparent' }}
-              >
-                <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: nodeColors[r.type] ?? '#8b949e' }} />
-                <span style={{ color: '#e6edf3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.label}</span>
-                <span style={{ color: '#6e7681', marginLeft: 'auto', flexShrink: 0, textTransform: 'uppercase', fontSize: 10 }}>{r.type}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      )}
+
+      {/* ── Hover tooltip: node name after a short dwell ─────────────────── */}
+      {hoverTip && (() => {
+        // Flip to the left of the cursor when close to the right edge so long
+        // names never spill outside the canvas.
+        const nearRight = svgSize.w && hoverTip.x > svgSize.w - 220
+        return (
+          <div
+            style={{
+              position: 'absolute',
+              left: nearRight ? undefined : hoverTip.x + 14,
+              right: nearRight ? Math.max(8, svgSize.w - hoverTip.x + 14) : undefined,
+              top: hoverTip.y + 16,
+              zIndex: 50, pointerEvents: 'none', maxWidth: 340,
+              background: '#161b22', border: '1px solid #30363d', borderRadius: 6,
+              padding: '4px 9px', fontSize: 12, color: '#e6edf3',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              boxShadow: '0 2px 10px rgba(0,0,0,0.5)',
+            }}
+          >
+            {hoverTip.label}
+          </div>
+        )
+      })()}
+
+      {/* ── Search-to-focus: Ctrl/Cmd+F opens a centred, screen-dimming overlay ── */}
+      {searchOpen && (
+        <div
+          style={{
+            position: 'absolute', inset: 0, zIndex: 100,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+            paddingTop: '14vh',
+          }}
+          onMouseDown={e => { if (e.target === e.currentTarget) setSearchOpen(false) }}
+        >
+          <div style={{ width: 480, maxWidth: '90%' }}>
+            <input
+              ref={searchInputRef}
+              value={searchQuery}
+              onChange={e => { setSearchQuery(e.target.value); setSearchActiveIdx(0) }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  const pick = searchResults[searchActiveIdx] ?? searchResults[0]
+                  if (pick) chooseSearchResult(pick.id)
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  setSearchOpen(false)
+                } else if (e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  setSearchActiveIdx(i => Math.min(i + 1, searchResults.length - 1))
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  setSearchActiveIdx(i => Math.max(i - 1, 0))
+                }
+              }}
+              placeholder="Search nodes…"
+              spellCheck={false}
+              style={{
+                width: '100%', boxSizing: 'border-box', padding: '12px 14px',
+                background: '#0d1117', border: '1px solid #30363d', borderRadius: 8,
+                color: '#e6edf3', fontSize: 15, fontFamily: 'inherit', outline: 'none',
+                boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+              }}
+            />
+            {searchResults.length > 0 && (
+              <ul style={{
+                listStyle: 'none', margin: '8px 0 0', padding: 6, maxHeight: '50vh', overflowY: 'auto',
+                background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
+                boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+              }}>
+                {searchResults.map((r, i) => (
+                  <li
+                    key={r.id}
+                    onClick={() => chooseSearchResult(r.id)}
+                    onMouseEnter={() => setSearchActiveIdx(i)}
+                    title={r.full || r.label}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 9, padding: '7px 10px',
+                      borderRadius: 5, cursor: 'pointer', fontSize: 13.5,
+                      background: i === searchActiveIdx ? '#1f2630' : 'transparent',
+                    }}
+                  >
+                    <span style={{ width: 9, height: 9, borderRadius: '50%', flexShrink: 0, background: nodeColors[r.type] ?? '#8b949e' }} />
+                    <span style={{ color: '#e6edf3', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.label}</span>
+                    <span style={{ color: '#6e7681', marginLeft: 'auto', flexShrink: 0, textTransform: 'uppercase', fontSize: 10.5 }}>{r.type}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {searchQuery.trim() && searchResults.length === 0 && (
+              <div style={{
+                marginTop: 8, padding: '10px 14px', background: '#161b22',
+                border: '1px solid #30363d', borderRadius: 8, color: '#6e7681', fontSize: 13,
+              }}>
+                No matches
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── Minimap ─────────────────────────────────────────────────────── */}
       {minimapData && (

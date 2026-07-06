@@ -16,12 +16,16 @@ export const ClassNode = memo(function ClassNode({ data, position, size, selecte
   const { w }    = size  // square node: w === h
 
   // ── Normal-state header geometry ─────────────────────────────────────────
-  const estTextW = (data.label?.length ?? 0) * CHAR_W
-  const groupW   = ICON_W + GAP + estTextW
+  // Scale the header with the box so an expanded class's title stays readable.
+  const hScale     = Math.max(1, Math.min(w / 180, 3.5))
+  const headerFont = 12 * hScale
+  const iconW    = ICON_W * hScale
+  const gap      = GAP * hScale
+  const estTextW = (data.label?.length ?? 0) * CHAR_W * hScale
+  const groupW   = iconW + gap + estTextW
   const iconX    = x + w / 2 - groupW / 2
-  const textX    = iconX + ICON_W + GAP
-  const iconY    = y + 9
-  const textY    = y + 23
+  const textX    = iconX + iconW + gap
+  const headerTop = y + 9 * hScale
 
   // ── Collapsed-state geometry ─────────────────────────────────────────────
   // Same zoom-compensating formula as FileNode.
@@ -41,7 +45,7 @@ export const ClassNode = memo(function ClassNode({ data, position, size, selecte
 
       {/* ── Normal state: icon + header label ───────────────────────────── */}
       <g style={{ opacity: collapsed ? 0 : 1, transition: 'opacity 0.3s ease', pointerEvents: 'none' }}>
-        <g transform={`translate(${iconX}, ${iconY})`}>
+        <g transform={`translate(${iconX}, ${headerTop}) scale(${hScale})`}>
           <circle cx="8" cy="8" r="8" fill={color} />
           <text
             x="8" y="11.5" textAnchor="middle"
@@ -52,8 +56,8 @@ export const ClassNode = memo(function ClassNode({ data, position, size, selecte
           </text>
         </g>
         <text
-          x={textX} y={textY}
-          fill={text} fontSize="12" fontWeight="600"
+          x={textX} y={headerTop} dominantBaseline="hanging"
+          fill={text} fontSize={headerFont} fontWeight="600"
           style={{ userSelect: 'none' }}
         >
           {data.label}

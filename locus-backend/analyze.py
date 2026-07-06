@@ -20,6 +20,8 @@ EXT_TO_LANG = {
     ".mjs":  "javascript",
     ".cjs":  "javascript",
     ".java": "java",
+    ".ts":   "typescript",
+    ".tsx":  "typescript",
 }
 
 # Directories that never contain first-party source worth graphing
@@ -47,6 +49,9 @@ def get_parser(lang):
     if lang == "java":
         from parser.java_parser import JavaParser
         return JavaParser()
+    if lang == "typescript":
+        from parser.typescript_parser import TypeScriptParser
+        return TypeScriptParser()
     raise ValueError(f"Unsupported language: {lang}")
 
 
@@ -268,10 +273,10 @@ def main():
         short = full_mod.split(".")[-1]
         short_module_to_rel_paths.setdefault(short, []).append(rel)
 
-    # JS files indexed by normalized relative path (forward slashes)
+    # JS/TS files indexed by normalized relative path (forward slashes)
     js_rel_paths = {
         rel.replace(os.sep, "/"): rel
-        for rel, lang in rel_path_lang.items() if lang == "javascript"
+        for rel, lang in rel_path_lang.items() if lang in ("javascript", "typescript")
     }
 
     def resolve_python_module(module, importer_rel_path):
@@ -304,7 +309,10 @@ def main():
         importer_dir = os.path.dirname(importer_rel_path).replace(os.sep, "/")
         joined = os.path.normpath(os.path.join(importer_dir, module)).replace(os.sep, "/")
         candidates = [joined] if os.path.splitext(joined)[1] else []
-        candidates += [joined + ext for ext in (".js", ".jsx", ".mjs", ".cjs")]
+        candidates += [joined + ext for ext in
+                       (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")]
+        candidates.append(joined + "/index.ts")
+        candidates.append(joined + "/index.tsx")
         candidates.append(joined + "/index.js")
         for cand in candidates:
             if cand in js_rel_paths:
@@ -326,7 +334,7 @@ def main():
 
     def resolve_module(module, importer_rel_path):
         lang = rel_path_lang.get(importer_rel_path, "python")
-        if lang == "javascript":
+        if lang in ("javascript", "typescript"):
             return resolve_js_module(module, importer_rel_path)
         if lang == "java":
             return None  # Java handled separately via resolve_java_import
